@@ -1,6 +1,9 @@
 #include "application.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -10,6 +13,9 @@
 
 #include <imgui.h>
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+
 namespace application {
 
 namespace {
@@ -18,11 +24,64 @@ struct PushConstants {
 	alignas(16) glm::mat4 mvp;
 };
 
+struct Vertex {
+	glm::vec3 position;
+	glm::vec3 color;
+};
+
 static_assert(sizeof(PushConstants) == 64);
+static_assert(sizeof(Vertex) == sizeof(float) * 6);
+
+const std::array<Vertex, 18> vertices = {{
+	// Front face
+	{{ 0.0f,  0.8f,  0.0f}, {1.0f, 0.0f, 0.0f}},
+	{{-0.7f, -0.6f, -0.7f}, {1.0f, 0.0f, 0.0f}},
+	{{ 0.7f, -0.6f, -0.7f}, {1.0f, 0.0f, 0.0f}},
+
+	// Right face
+	{{ 0.0f,  0.8f,  0.0f}, {0.0f, 1.0f, 0.0f}},
+	{{ 0.7f, -0.6f, -0.7f}, {0.0f, 1.0f, 0.0f}},
+	{{ 0.7f, -0.6f,  0.7f}, {0.0f, 1.0f, 0.0f}},
+
+	// Back face
+	{{ 0.0f,  0.8f,  0.0f}, {0.0f, 0.0f, 1.0f}},
+	{{ 0.7f, -0.6f,  0.7f}, {0.0f, 0.0f, 1.0f}},
+	{{-0.7f, -0.6f,  0.7f}, {0.0f, 0.0f, 1.0f}},
+
+	// Left face
+	{{ 0.0f,  0.8f,  0.0f}, {1.0f, 0.8f, 0.0f}},
+	{{-0.7f, -0.6f,  0.7f}, {1.0f, 0.8f, 0.0f}},
+	{{-0.7f, -0.6f, -0.7f}, {1.0f, 0.8f, 0.0f}},
+
+	// Base (two triangles)
+	{{-0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{-0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{ 0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
+
+	{{-0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{ 0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{ 0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
+}};
 
 VkPipelineLayout pipeline_layout;
 VkPipeline graphics_pipeline;
+VkBuffer vertex_buffer;
+VmaAllocation vertex_buffer_allocation;
 float rotation_angle;
+
+GLFWwindow* application_window;
+
+glm::vec3 camera_position = { 0.0f, 0.4f, 3.0f };
+glm::vec3 camera_forward = { 0.0f, 0.0f, -1.0f };
+const glm::vec3 world_up = { 0.0f, 1.0f, 0.0f };
+
+float camera_yaw = glm::radians(-90.0f);
+float camera_pitch = 0.0f;
+double previous_frame_time = -1.0;
+
+bool isKeyPressed(int key) {
+	return glfwGetKey(application_window, key) == GLFW_PRESS;
+}
 
 VkShaderModule loadShaderModule(const char* filename) {
 	std::ifstream file(filename, std::ios::ate | std::ios::binary);
@@ -61,9 +120,56 @@ VkShaderModule loadShaderModule(const char* filename) {
 	return shader_module;
 }
 
+bool createVertexBuffer() {
+	auto& context = graphics::internal::context;
+
+	const VkBufferCreateInfo buffer_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = sizeof(vertices),
+		.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+
+	const VmaAllocationCreateInfo allocation_create_info = {
+		.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+		         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+		.usage = VMA_MEMORY_USAGE_AUTO,
+	};
+
+	VmaAllocationInfo allocation_info;
+	if (vmaCreateBuffer(context.allocator, &buffer_info, &allocation_create_info,
+	                    &vertex_buffer, &vertex_buffer_allocation,
+	                    &allocation_info) != VK_SUCCESS) {
+		std::cerr << "Failed to create Vulkan vertex buffer\n";
+		return false;
+	}
+
+	if (allocation_info.pMappedData == nullptr) {
+		std::cerr << "Failed to map Vulkan vertex buffer\n";
+		vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_buffer_allocation);
+		vertex_buffer = VK_NULL_HANDLE;
+		vertex_buffer_allocation = VK_NULL_HANDLE;
+		return false;
+	}
+
+	std::memcpy(allocation_info.pMappedData, vertices.data(), sizeof(vertices));
+	if (vmaFlushAllocation(context.allocator, vertex_buffer_allocation,
+	                       0, sizeof(vertices)) != VK_SUCCESS) {
+		std::cerr << "Failed to flush Vulkan vertex buffer memory\n";
+		vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_buffer_allocation);
+		vertex_buffer = VK_NULL_HANDLE;
+		vertex_buffer_allocation = VK_NULL_HANDLE;
+		return false;
+	}
+
+	return true;
+}
+
 } // namespace
 
-bool initialize() {
+bool initialize(GLFWwindow* window) {
+	application_window = window;
+
 	auto& context = graphics::internal::context;
 
 	const VkShaderModule vertex_shader = loadShaderModule("shaders/triangle.vert.spv");
@@ -92,10 +198,34 @@ bool initialize() {
 		},
 	};
 
-	// The shader generates all pyramid vertices from gl_VertexIndex, so this
-	// version does not need vertex buffers or vertex attributes.
+	const VkVertexInputBindingDescription vertex_binding = {
+		.binding = 0,
+		.stride = sizeof(Vertex),
+		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+	};
+
+	const VkVertexInputAttributeDescription vertex_attributes[] = {
+		{
+			.location = 0,
+			.binding = 0,
+			.format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = uint32_t(offsetof(Vertex, position)),
+		},
+		{
+			.location = 1,
+			.binding = 0,
+			.format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = uint32_t(offsetof(Vertex, color)),
+		},
+	};
+
 	const VkPipelineVertexInputStateCreateInfo vertex_input = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+		.vertexBindingDescriptionCount = 1,
+		.pVertexBindingDescriptions = &vertex_binding,
+		.vertexAttributeDescriptionCount = uint32_t(
+			sizeof(vertex_attributes) / sizeof(vertex_attributes[0])),
+		.pVertexAttributeDescriptions = vertex_attributes,
 	};
 
 	const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -205,6 +335,14 @@ bool initialize() {
 		return false;
 	}
 
+	if (!createVertexBuffer()) {
+		vkDestroyPipeline(context.device, graphics_pipeline, nullptr);
+		vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
+		graphics_pipeline = VK_NULL_HANDLE;
+		pipeline_layout = VK_NULL_HANDLE;
+		return false;
+	}
+
 	return true;
 }
 
@@ -212,11 +350,82 @@ void shutdown() {
 	auto& context = graphics::internal::context;
 	vkQueueWaitIdle(context.graphics_queue);
 
+	vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_buffer_allocation);
 	vkDestroyPipeline(context.device, graphics_pipeline, nullptr);
 	vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
+
+	application_window = nullptr;
 }
 
 void update(double time) {
+	float delta_time = 0.0f;
+	if (previous_frame_time >= 0.0) {
+		delta_time = static_cast<float>(time - previous_frame_time);
+	}
+	previous_frame_time = time;
+	delta_time = glm::min(delta_time, 0.1f);
+
+	if (!ImGui::GetIO().WantCaptureKeyboard) {
+		const float rotation_speed = glm::radians(90.0f);
+
+		if (isKeyPressed(GLFW_KEY_H)) {
+			camera_yaw -= rotation_speed * delta_time;
+		}
+		if (isKeyPressed(GLFW_KEY_L)) {
+			camera_yaw += rotation_speed * delta_time;
+		}
+		if (isKeyPressed(GLFW_KEY_J)) {
+			camera_pitch -= rotation_speed * delta_time;
+		}
+		if (isKeyPressed(GLFW_KEY_K)) {
+			camera_pitch += rotation_speed * delta_time;
+		}
+
+		camera_pitch = glm::clamp(
+			camera_pitch, glm::radians(-89.0f), glm::radians(89.0f));
+
+		const glm::vec3 direction = {
+			glm::cos(camera_pitch) * glm::cos(camera_yaw),
+			glm::sin(camera_pitch),
+			glm::cos(camera_pitch) * glm::sin(camera_yaw),
+		};
+		camera_forward = glm::normalize(direction);
+
+		const glm::vec3 movement_forward = glm::normalize(glm::vec3(
+			camera_forward.x, 0.0f, camera_forward.z));
+		const glm::vec3 camera_right = glm::normalize(
+			glm::cross(movement_forward, world_up));
+
+		const float movement_speed = 2.0f;
+		const float movement_distance = movement_speed * delta_time;
+
+		if (isKeyPressed(GLFW_KEY_W)) {
+			camera_position += movement_forward * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_S)) {
+			camera_position -= movement_forward * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_A)) {
+			camera_position -= camera_right * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_D)) {
+			camera_position += camera_right * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_SPACE)) {
+			camera_position += world_up * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_LEFT_SHIFT)) {
+			camera_position -= world_up * movement_distance;
+		}
+		if (isKeyPressed(GLFW_KEY_U)) {
+			camera_position = glm::vec3(0.0f, 0.4f, 3.0f);
+			camera_forward = glm::vec3(0.0f, 0.0f, -1.0f);
+
+			camera_yaw = glm::radians(-90.0f);
+			camera_pitch = 0.0f;
+		}
+	}
+
 	rotation_angle = static_cast<float>(time) * 0.8f;
 	ImGui::ShowDemoWindow();
 }
@@ -272,19 +481,23 @@ void render(const graphics::internal::FrameData& fd) {
 	vkCmdSetScissor(fd.command_buffer, 0, 1, &scissor);
 	vkCmdBindPipeline(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics_pipeline);
 
+	const VkDeviceSize vertex_buffer_offset = 0;
+	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1,
+	                       &vertex_buffer, &vertex_buffer_offset);
+
 	const glm::mat4 model = glm::rotate(
 		glm::mat4(1.0f), rotation_angle, glm::vec3(0.0f, 1.0f, 0.0f));
 
 	const glm::mat4 view = glm::lookAt(
-		glm::vec3(0.0f, 0.4f, 3.0f),
-		glm::vec3(0.0f, 0.0f, 0.0f),
-		glm::vec3(0.0f, 1.0f, 0.0f));
+		camera_position,
+		camera_position + camera_forward,
+		world_up);
 
 	const float aspect = float(context.swapchain_extent.width) /
 	                     float(context.swapchain_extent.height);
 
 	glm::mat4 projection = glm::perspective(
-		glm::radians(60.0f), aspect, 0.1f, 10.0f);
+		glm::radians(70.0f), aspect, 0.1f, 10.0f);
 	projection[1][1] *= -1.0f;
 
 	const PushConstants push_constants = {
@@ -293,7 +506,7 @@ void render(const graphics::internal::FrameData& fd) {
 
 	vkCmdPushConstants(fd.command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
 	                   0, sizeof(PushConstants), &push_constants);
-	vkCmdDraw(fd.command_buffer, 18, 1, 0, 0);
+	vkCmdDraw(fd.command_buffer, uint32_t(vertices.size()), 1, 0, 0);
 
 	vkCmdEndRenderPass(fd.command_buffer);
 

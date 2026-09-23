@@ -66,7 +66,7 @@ int main() {
 		goto err_graphics_init;
 	}
 
-	if (!application::initialize()) {
+	if (!application::initialize(glfw_window)) {
 		std::cerr << "Failed to initialize application\n";
 		status = EXIT_FAILURE;
 		goto err_application_init;

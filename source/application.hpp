@@ -4,7 +4,7 @@
 
 namespace application {
 
-bool initialize();
+bool initialize(GLFWwindow* window);
 void shutdown();
 
 void update(double time);
