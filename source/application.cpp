@@ -13,6 +13,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <imgui.h>
+#include <miniaudio.h>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -143,6 +144,13 @@ float jump_height = 1.5f;
 
 bool jump_on_pause = false;
 
+ma_engine audio_engine{};
+ma_sound jump_sound{};
+ma_sound pause_sound{};
+bool audio_engine_initialized = false;
+bool jump_sound_initialized = false;
+bool pause_sound_initialized = false;
+
 GLFWwindow* application_window;
 
 const glm::vec3 default_camera_position = { 0.0f, 0.1f, 3.0f };
@@ -176,6 +184,95 @@ void resetCamera() {
 	camera_forward = default_camera_forward;
 	camera_yaw = default_camera_yaw;
 	camera_pitch = default_camera_pitch;
+}
+
+void shutdownAudio() {
+	if (pause_sound_initialized) {
+		ma_sound_uninit(&pause_sound);
+		pause_sound_initialized = false;
+	}
+	if (jump_sound_initialized) {
+		ma_sound_uninit(&jump_sound);
+		jump_sound_initialized = false;
+	}
+	if (audio_engine_initialized) {
+		ma_engine_uninit(&audio_engine);
+		audio_engine_initialized = false;
+	}
+}
+
+bool initializeAudio() {
+	if (ma_engine_init(nullptr, &audio_engine) != MA_SUCCESS) {
+		std::cerr << "Failed to initialize miniaudio engine\n";
+		return false;
+	}
+	audio_engine_initialized = true;
+
+	constexpr ma_uint32 sound_flags =
+		MA_SOUND_FLAG_STREAM | MA_SOUND_FLAG_NO_SPATIALIZATION;
+	if (ma_sound_init_from_file(
+			&audio_engine, "audio/jump.mp3", sound_flags,
+			nullptr, nullptr, &jump_sound) != MA_SUCCESS) {
+		std::cerr << "Failed to load audio/jump.mp3\n";
+		shutdownAudio();
+		return false;
+	}
+	jump_sound_initialized = true;
+
+	if (ma_sound_init_from_file(
+			&audio_engine, "audio/pause.mp3", sound_flags,
+			nullptr, nullptr, &pause_sound) != MA_SUCCESS) {
+		std::cerr << "Failed to load audio/pause.mp3\n";
+		shutdownAudio();
+		return false;
+	}
+	pause_sound_initialized = true;
+
+	return true;
+}
+
+void stopAndRewind(ma_sound& sound) {
+	ma_sound_stop(&sound);
+	ma_sound_seek_to_pcm_frame(&sound, 0);
+}
+
+void startJumpAudio() {
+	if (!jump_sound_initialized || !pause_sound_initialized) {
+		return;
+	}
+
+	stopAndRewind(pause_sound);
+	stopAndRewind(jump_sound);
+	ma_sound_start(&jump_sound);
+}
+
+void pauseJumpAudio() {
+	if (!jump_sound_initialized || !pause_sound_initialized) {
+		return;
+	}
+
+	// ma_sound_stop() preserves the playback cursor, so jump.mp3 can resume.
+	ma_sound_stop(&jump_sound);
+	stopAndRewind(pause_sound);
+	ma_sound_start(&pause_sound);
+}
+
+void resumeJumpAudio() {
+	if (!jump_sound_initialized || !pause_sound_initialized) {
+		return;
+	}
+
+	stopAndRewind(pause_sound);
+	ma_sound_start(&jump_sound);
+}
+
+void finishJumpAudio() {
+	if (jump_sound_initialized) {
+		stopAndRewind(jump_sound);
+	}
+	if (pause_sound_initialized) {
+		stopAndRewind(pause_sound);
+	}
 }
 
 VkShaderModule loadShaderModule(const char* filename) {
@@ -717,10 +814,16 @@ bool initialize(GLFWwindow* window) {
 		return false;
 	}
 
+	if (!initializeAudio()) {
+		std::cerr << "Audio is disabled, graphics will continue to work\n";
+	}
+
 	return true;
 }
 
 void shutdown() {
+	shutdownAudio();
+
 	auto& context = graphics::internal::context;
 	vkQueueWaitIdle(context.graphics_queue);
 
@@ -813,11 +916,17 @@ void drawInterface() {
 		jump_on_pause = false;
 		jump_animation_time = 0.0f;
 		animated_object_index = size_t(selected_object_index);
+		startJumpAudio();
 	}
 
 	if (jump_animation_active) {
 		if (ImGui::Button("Pause/Resume")) {
 			jump_on_pause ^= 1;
+			if (jump_on_pause) {
+				pauseJumpAudio();
+			} else {
+				resumeJumpAudio();
+			}
 		}
 	}
 
@@ -919,6 +1028,7 @@ void update(double time) {
 			jump_animation_time = 0.0f;
 			jump_height_offset = 0.0f;
 			somersault_angle = 0.0f;
+			finishJumpAudio();
 		}
 	}
 

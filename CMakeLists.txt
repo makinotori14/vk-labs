@@ -49,6 +49,12 @@ FetchContent_Declare(
 	GIT_TAG 1.0.1
 )
 
+FetchContent_Declare(
+	miniaudio
+	GIT_REPOSITORY https://github.com/mackron/miniaudio.git
+	GIT_TAG 0.11.25
+)
+
 find_package(Vulkan REQUIRED)
 
 set(GLFW_LIBRARY_TYPE STATIC)
@@ -62,6 +68,7 @@ FetchContent_MakeAvailable(
 	VulkanMemoryAllocator
 	imgui
 	glm
+	miniaudio
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -70,6 +77,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 	vk-bootstrap::vk-bootstrap
 	GPUOpen::VulkanMemoryAllocator
 	glm::glm
+	miniaudio
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE
