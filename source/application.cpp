@@ -29,6 +29,11 @@ struct Vertex {
 	glm::vec3 color;
 };
 
+enum class ProjectionType {
+	Perspective,
+	Orthographic,
+};
+
 static_assert(sizeof(PushConstants) == 64);
 static_assert(sizeof(Vertex) == sizeof(float) * 6);
 
@@ -71,16 +76,35 @@ float rotation_angle;
 
 GLFWwindow* application_window;
 
-glm::vec3 camera_position = { 0.0f, 0.4f, 3.0f };
-glm::vec3 camera_forward = { 0.0f, 0.0f, -1.0f };
+const glm::vec3 default_camera_position = { 0.0f, 0.1f, 3.0f };
+const glm::vec3 default_camera_forward = { 0.0f, 0.0f, -1.0f };
+const float default_camera_yaw = glm::radians(-90.0f);
+const float default_camera_pitch = 0.0f;
+
+glm::vec3 camera_position = default_camera_position;
+glm::vec3 camera_forward = default_camera_forward;
 const glm::vec3 world_up = { 0.0f, 1.0f, 0.0f };
 
-float camera_yaw = glm::radians(-90.0f);
-float camera_pitch = 0.0f;
+float camera_yaw = default_camera_yaw;
+float camera_pitch = default_camera_pitch;
+ProjectionType projection_type = ProjectionType::Perspective;
+
+constexpr float perspective_fov_degrees = 70.0f;
+constexpr float orthographic_half_height = 1.5f;
+constexpr float near_plane = 0.1f;
+constexpr float far_plane = 10.0f;
+
 double previous_frame_time = -1.0;
 
 bool isKeyPressed(int key) {
 	return glfwGetKey(application_window, key) == GLFW_PRESS;
+}
+
+void resetCamera() {
+	camera_position = default_camera_position;
+	camera_forward = default_camera_forward;
+	camera_yaw = default_camera_yaw;
+	camera_pitch = default_camera_pitch;
 }
 
 VkShaderModule loadShaderModule(const char* filename) {
@@ -357,6 +381,33 @@ void shutdown() {
 	application_window = nullptr;
 }
 
+void drawInterface() {
+    ImGui::SetNextWindowSize(
+        ImVec2(320.0f, 180.0f),
+        ImGuiCond_FirstUseEver
+    );
+	
+	ImGui::Begin("Menu");
+
+	if (ImGui::Button("Reset cam pos")) {
+		resetCamera();
+	}
+
+	ImGui::SeparatorText("Projection");
+
+	if (ImGui::RadioButton(
+			"Perspective", projection_type == ProjectionType::Perspective)) {
+		projection_type = ProjectionType::Perspective;
+	}
+	ImGui::SameLine();
+	if (ImGui::RadioButton(
+			"Orthographic", projection_type == ProjectionType::Orthographic)) {
+		projection_type = ProjectionType::Orthographic;
+	}
+
+	ImGui::End();
+}
+
 void update(double time) {
 	float delta_time = 0.0f;
 	if (previous_frame_time >= 0.0) {
@@ -418,16 +469,13 @@ void update(double time) {
 			camera_position -= world_up * movement_distance;
 		}
 		if (isKeyPressed(GLFW_KEY_U)) {
-			camera_position = glm::vec3(0.0f, 0.4f, 3.0f);
-			camera_forward = glm::vec3(0.0f, 0.0f, -1.0f);
-
-			camera_yaw = glm::radians(-90.0f);
-			camera_pitch = 0.0f;
+			resetCamera();
 		}
 	}
 
 	rotation_angle = static_cast<float>(time) * 0.8f;
-	ImGui::ShowDemoWindow();
+
+	drawInterface();
 }
 
 void render(const graphics::internal::FrameData& fd) {
@@ -496,8 +544,20 @@ void render(const graphics::internal::FrameData& fd) {
 	const float aspect = float(context.swapchain_extent.width) /
 	                     float(context.swapchain_extent.height);
 
-	glm::mat4 projection = glm::perspective(
-		glm::radians(70.0f), aspect, 0.1f, 10.0f);
+	glm::mat4 projection;
+	if (projection_type == ProjectionType::Perspective) {
+		projection = glm::perspective(
+			glm::radians(perspective_fov_degrees), aspect, near_plane, far_plane);
+	} else {
+		const float orthographic_half_width = orthographic_half_height * aspect;
+		projection = glm::ortho(
+			-orthographic_half_width,
+			 orthographic_half_width,
+			-orthographic_half_height,
+			 orthographic_half_height,
+			 near_plane,
+			 far_plane);
+	}
 	projection[1][1] *= -1.0f;
 
 	const PushConstants push_constants = {
