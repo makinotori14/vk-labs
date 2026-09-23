@@ -21,7 +21,7 @@ namespace application {
 
 namespace {
 
-struct PushConstants {
+struct UniformData {
 	alignas(16) glm::mat4 mvp;
 };
 
@@ -35,7 +35,7 @@ enum class ProjectionType {
 	Orthographic,
 };
 
-static_assert(sizeof(PushConstants) == 64);
+static_assert(sizeof(UniformData) == 64);
 static_assert(sizeof(Vertex) == sizeof(float) * 6);
 
 std::array<glm::vec3, 5> face_colors = {{
@@ -79,6 +79,14 @@ std::array<Vertex, 18> vertices = {{
 
 VkPipelineLayout pipeline_layout;
 VkPipeline graphics_pipeline;
+
+VkDescriptorSetLayout descriptor_set_layout;
+VkDescriptorPool descriptor_pool;
+VkDescriptorSet descriptor_set;
+VkBuffer uniform_buffer;
+VmaAllocation uniform_buffer_allocation;
+void* uniform_buffer_mapped_data;
+
 VkBuffer vertex_buffer;
 VmaAllocation vertex_buffer_allocation;
 void* vertex_buffer_mapped_data;
@@ -209,6 +217,143 @@ bool uploadVertices() {
 	return true;
 }
 
+void destroyDescriptorResources() {
+	auto& context = graphics::internal::context;
+
+	if (descriptor_pool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
+		descriptor_pool = VK_NULL_HANDLE;
+		descriptor_set = VK_NULL_HANDLE;
+	}
+
+	if (uniform_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(context.allocator, uniform_buffer, uniform_buffer_allocation);
+		uniform_buffer = VK_NULL_HANDLE;
+		uniform_buffer_allocation = VK_NULL_HANDLE;
+		uniform_buffer_mapped_data = nullptr;
+	}
+
+	if (descriptor_set_layout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(context.device, descriptor_set_layout, nullptr);
+		descriptor_set_layout = VK_NULL_HANDLE;
+	}
+}
+
+bool createDescriptorResources() {
+	auto& context = graphics::internal::context;
+
+	const VkDescriptorSetLayoutBinding uniform_binding = {
+		.binding = 0,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+	};
+
+	const VkDescriptorSetLayoutCreateInfo layout_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+		.bindingCount = 1,
+		.pBindings = &uniform_binding,
+	};
+
+	if (vkCreateDescriptorSetLayout(context.device, &layout_info, nullptr,
+	                                &descriptor_set_layout) != VK_SUCCESS) {
+		std::cerr << "Failed to create Vulkan descriptor set layout\n";
+		return false;
+	}
+
+	const VkBufferCreateInfo buffer_info = {
+		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+		.size = sizeof(UniformData),
+		.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+	};
+
+	const VmaAllocationCreateInfo allocation_create_info = {
+		.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+		         VMA_ALLOCATION_CREATE_MAPPED_BIT,
+		.usage = VMA_MEMORY_USAGE_AUTO,
+	};
+
+	VmaAllocationInfo allocation_info = {};
+	if (vmaCreateBuffer(context.allocator, &buffer_info, &allocation_create_info,
+	                    &uniform_buffer, &uniform_buffer_allocation,
+	                    &allocation_info) != VK_SUCCESS ||
+	    allocation_info.pMappedData == nullptr) {
+		std::cerr << "Failed to create mapped Vulkan uniform buffer\n";
+		destroyDescriptorResources();
+		return false;
+	}
+	uniform_buffer_mapped_data = allocation_info.pMappedData;
+
+	const VkDescriptorPoolSize pool_size = {
+		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.descriptorCount = 1,
+	};
+
+	const VkDescriptorPoolCreateInfo pool_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+		.maxSets = 1,
+		.poolSizeCount = 1,
+		.pPoolSizes = &pool_size,
+	};
+
+	if (vkCreateDescriptorPool(context.device, &pool_info, nullptr,
+	                           &descriptor_pool) != VK_SUCCESS) {
+		std::cerr << "Failed to create Vulkan descriptor pool\n";
+		destroyDescriptorResources();
+		return false;
+	}
+
+	const VkDescriptorSetAllocateInfo allocate_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = descriptor_pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &descriptor_set_layout,
+	};
+
+	if (vkAllocateDescriptorSets(context.device, &allocate_info,
+	                             &descriptor_set) != VK_SUCCESS) {
+		std::cerr << "Failed to allocate Vulkan descriptor set\n";
+		destroyDescriptorResources();
+		return false;
+	}
+
+	const VkDescriptorBufferInfo descriptor_buffer_info = {
+		.buffer = uniform_buffer,
+		.offset = 0,
+		.range = sizeof(UniformData),
+	};
+
+	const VkWriteDescriptorSet descriptor_write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = descriptor_set,
+		.dstBinding = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.pBufferInfo = &descriptor_buffer_info,
+	};
+
+	vkUpdateDescriptorSets(context.device, 1, &descriptor_write, 0, nullptr);
+	return true;
+}
+
+bool uploadUniformData(const UniformData& uniform_data) {
+	if (uniform_buffer_mapped_data == nullptr) {
+		std::cerr << "Vulkan uniform buffer is not mapped\n";
+		return false;
+	}
+
+	std::memcpy(uniform_buffer_mapped_data, &uniform_data, sizeof(uniform_data));
+	if (vmaFlushAllocation(graphics::internal::context.allocator,
+	                       uniform_buffer_allocation,
+	                       0, sizeof(uniform_data)) != VK_SUCCESS) {
+		std::cerr << "Failed to flush Vulkan uniform buffer memory\n";
+		return false;
+	}
+
+	return true;
+}
+
 bool createVertexBuffer() {
 	auto& context = graphics::internal::context;
 
@@ -268,6 +413,12 @@ bool initialize(GLFWwindow* window) {
 
 	const VkShaderModule fragment_shader = loadShaderModule("shaders/triangle.frag.spv");
 	if (fragment_shader == VK_NULL_HANDLE) {
+		vkDestroyShaderModule(context.device, vertex_shader, nullptr);
+		return false;
+	}
+
+	if (!createDescriptorResources()) {
+		vkDestroyShaderModule(context.device, fragment_shader, nullptr);
 		vkDestroyShaderModule(context.device, vertex_shader, nullptr);
 		return false;
 	}
@@ -374,16 +525,10 @@ bool initialize(GLFWwindow* window) {
 		.pDynamicStates = dynamic_states,
 	};
 
-	const VkPushConstantRange push_constant_range = {
-		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-		.offset = 0,
-		.size = sizeof(PushConstants),
-	};
-
 	const VkPipelineLayoutCreateInfo pipeline_layout_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-		.pushConstantRangeCount = 1,
-		.pPushConstantRanges = &push_constant_range,
+		.setLayoutCount = 1,
+		.pSetLayouts = &descriptor_set_layout,
 	};
 
 	if (vkCreatePipelineLayout(context.device, &pipeline_layout_info, nullptr,
@@ -391,6 +536,7 @@ bool initialize(GLFWwindow* window) {
 		std::cerr << "Failed to create Vulkan pipeline layout\n";
 		vkDestroyShaderModule(context.device, fragment_shader, nullptr);
 		vkDestroyShaderModule(context.device, vertex_shader, nullptr);
+		destroyDescriptorResources();
 		return false;
 	}
 
@@ -421,6 +567,7 @@ bool initialize(GLFWwindow* window) {
 		std::cerr << "Failed to create Vulkan graphics pipeline\n";
 		vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
 		pipeline_layout = VK_NULL_HANDLE;
+		destroyDescriptorResources();
 		return false;
 	}
 
@@ -429,6 +576,7 @@ bool initialize(GLFWwindow* window) {
 		vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
 		graphics_pipeline = VK_NULL_HANDLE;
 		pipeline_layout = VK_NULL_HANDLE;
+		destroyDescriptorResources();
 		return false;
 	}
 
@@ -442,6 +590,7 @@ void shutdown() {
 	vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_buffer_allocation);
 	vkDestroyPipeline(context.device, graphics_pipeline, nullptr);
 	vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
+	destroyDescriptorResources();
 
 	vertex_buffer_mapped_data = nullptr;
 	application_window = nullptr;
@@ -731,12 +880,17 @@ void render(const graphics::internal::FrameData& fd) {
 	}
 	projection[1][1] *= -1.0f;
 
-	const PushConstants push_constants = {
+	const UniformData uniform_data = {
 		.mvp = projection * view * model,
 	};
+	uploadUniformData(uniform_data);
 
-	vkCmdPushConstants(fd.command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-	                   0, sizeof(PushConstants), &push_constants);
+	vkCmdBindDescriptorSets(
+		fd.command_buffer,
+		VK_PIPELINE_BIND_POINT_GRAPHICS,
+		pipeline_layout,
+		0, 1, &descriptor_set,
+		0, nullptr);
 	vkCmdDraw(fd.command_buffer, uint32_t(vertices.size()), 1, 0, 0);
 
 	vkCmdEndRenderPass(fd.command_buffer);
