@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <string>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -37,42 +38,66 @@ enum class ProjectionType {
 static_assert(sizeof(PushConstants) == 64);
 static_assert(sizeof(Vertex) == sizeof(float) * 6);
 
-const std::array<Vertex, 18> vertices = {{
+std::array<glm::vec3, 5> face_colors = {{
+	{1.0f, 1.0f, 1.0f},
+	{1.0f, 1.0f, 1.0f},
+	{1.0f, 1.0f, 1.0f},
+	{1.0f, 1.0f, 1.0f},
+	{1.0f, 1.0f, 1.0f},
+}};
+
+std::array<Vertex, 18> vertices = {{
 	// Front face
-	{{ 0.0f,  0.8f,  0.0f}, {1.0f, 0.0f, 0.0f}},
-	{{-0.7f, -0.6f, -0.7f}, {1.0f, 0.0f, 0.0f}},
-	{{ 0.7f, -0.6f, -0.7f}, {1.0f, 0.0f, 0.0f}},
+	{{ 0.0f,  0.8f,  0.0f}, face_colors[0]},
+	{{-0.7f, -0.6f, -0.7f}, face_colors[0]},
+	{{ 0.7f, -0.6f, -0.7f}, face_colors[0]},
 
 	// Right face
-	{{ 0.0f,  0.8f,  0.0f}, {0.0f, 1.0f, 0.0f}},
-	{{ 0.7f, -0.6f, -0.7f}, {0.0f, 1.0f, 0.0f}},
-	{{ 0.7f, -0.6f,  0.7f}, {0.0f, 1.0f, 0.0f}},
+	{{ 0.0f,  0.8f,  0.0f}, face_colors[1]},
+	{{ 0.7f, -0.6f, -0.7f}, face_colors[1]},
+	{{ 0.7f, -0.6f,  0.7f}, face_colors[1]},
 
 	// Back face
-	{{ 0.0f,  0.8f,  0.0f}, {0.0f, 0.0f, 1.0f}},
-	{{ 0.7f, -0.6f,  0.7f}, {0.0f, 0.0f, 1.0f}},
-	{{-0.7f, -0.6f,  0.7f}, {0.0f, 0.0f, 1.0f}},
+	{{ 0.0f,  0.8f,  0.0f}, face_colors[2]},
+	{{ 0.7f, -0.6f,  0.7f}, face_colors[2]},
+	{{-0.7f, -0.6f,  0.7f}, face_colors[2]},
 
 	// Left face
-	{{ 0.0f,  0.8f,  0.0f}, {1.0f, 0.8f, 0.0f}},
-	{{-0.7f, -0.6f,  0.7f}, {1.0f, 0.8f, 0.0f}},
-	{{-0.7f, -0.6f, -0.7f}, {1.0f, 0.8f, 0.0f}},
+	{{ 0.0f,  0.8f,  0.0f}, face_colors[3]},
+	{{-0.7f, -0.6f,  0.7f}, face_colors[3]},
+	{{-0.7f, -0.6f, -0.7f}, face_colors[3]},
 
 	// Base (two triangles)
-	{{-0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
-	{{-0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
-	{{ 0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{-0.7f, -0.6f, -0.7f}, face_colors[4]},
+	{{-0.7f, -0.6f,  0.7f}, face_colors[4]},
+	{{ 0.7f, -0.6f,  0.7f}, face_colors[4]},
 
-	{{-0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
-	{{ 0.7f, -0.6f,  0.7f}, {0.7f, 0.2f, 1.0f}},
-	{{ 0.7f, -0.6f, -0.7f}, {0.7f, 0.2f, 1.0f}},
+	{{-0.7f, -0.6f, -0.7f}, face_colors[4]},
+	{{ 0.7f, -0.6f,  0.7f}, face_colors[4]},
+	{{ 0.7f, -0.6f, -0.7f}, face_colors[4]},
 }};
 
 VkPipelineLayout pipeline_layout;
 VkPipeline graphics_pipeline;
 VkBuffer vertex_buffer;
 VmaAllocation vertex_buffer_allocation;
-float rotation_angle;
+void* vertex_buffer_mapped_data;
+bool vertex_colors_dirty = false;
+float rotation_angle = 0.0f;
+
+glm::vec3 pyramid_position = { 0.0f, 0.0f, 0.0f };
+glm::vec3 pyramid_rotation_degrees = { 0.0f, 0.0f, 0.0f };
+glm::vec3 pyramid_scale = { 1.0f, 1.0f, 1.0f };
+
+bool jump_animation_active = false;
+float jump_animation_time = 0.0f;
+float jump_height_offset = 0.0f;
+float somersault_angle = 0.0f;
+
+float jump_duration = 2.0f;
+float jump_height = 1.5f;
+
+bool jump_on_pause = false;
 
 GLFWwindow* application_window;
 
@@ -89,10 +114,12 @@ float camera_yaw = default_camera_yaw;
 float camera_pitch = default_camera_pitch;
 ProjectionType projection_type = ProjectionType::Perspective;
 
-constexpr float perspective_fov_degrees = 70.0f;
+float perspective_fov_degrees = 70.0f;
 constexpr float orthographic_half_height = 1.5f;
 constexpr float near_plane = 0.1f;
 constexpr float far_plane = 10.0f;
+
+bool pyramid_rotates = false;
 
 double previous_frame_time = -1.0;
 
@@ -144,6 +171,44 @@ VkShaderModule loadShaderModule(const char* filename) {
 	return shader_module;
 }
 
+glm::vec3 proceduralColor(const glm::vec3& position) {
+	const glm::vec3 min_position = {-0.7f, -0.6f, -0.7f};
+	const glm::vec3 max_position = { 0.7f,  0.8f,  0.7f};
+
+	return glm::clamp(
+		(position - min_position) / (max_position - min_position),
+		0.0f, 1.0f);
+}
+
+void applyFaceColorsToVertices() {
+	for (size_t vertex_index = 0; vertex_index < vertices.size(); ++vertex_index) {
+		const size_t face_index = vertex_index < 12
+			? vertex_index / 3
+			: 4;
+
+		const glm::vec3 base_color = proceduralColor(
+			vertices[vertex_index].position);
+		vertices[vertex_index].color = base_color * face_colors[face_index];
+	}
+}
+
+bool uploadVertices() {
+	if (vertex_buffer_mapped_data == nullptr) {
+		std::cerr << "Vulkan vertex buffer is not mapped\n";
+		return false;
+	}
+
+	std::memcpy(vertex_buffer_mapped_data, vertices.data(), sizeof(vertices));
+	if (vmaFlushAllocation(graphics::internal::context.allocator,
+	                       vertex_buffer_allocation,
+	                       0, sizeof(vertices)) != VK_SUCCESS) {
+		std::cerr << "Failed to flush Vulkan vertex buffer memory\n";
+		return false;
+	}
+
+	return true;
+}
+
 bool createVertexBuffer() {
 	auto& context = graphics::internal::context;
 
@@ -176,13 +241,13 @@ bool createVertexBuffer() {
 		return false;
 	}
 
-	std::memcpy(allocation_info.pMappedData, vertices.data(), sizeof(vertices));
-	if (vmaFlushAllocation(context.allocator, vertex_buffer_allocation,
-	                       0, sizeof(vertices)) != VK_SUCCESS) {
-		std::cerr << "Failed to flush Vulkan vertex buffer memory\n";
+	applyFaceColorsToVertices();
+	vertex_buffer_mapped_data = allocation_info.pMappedData;
+	if (!uploadVertices()) {
 		vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_buffer_allocation);
 		vertex_buffer = VK_NULL_HANDLE;
 		vertex_buffer_allocation = VK_NULL_HANDLE;
+		vertex_buffer_mapped_data = nullptr;
 		return false;
 	}
 
@@ -378,15 +443,30 @@ void shutdown() {
 	vkDestroyPipeline(context.device, graphics_pipeline, nullptr);
 	vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
 
+	vertex_buffer_mapped_data = nullptr;
 	application_window = nullptr;
 }
+void drawOverlay(const char* text) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 text_size = ImGui::CalcTextSize(text);
 
+    const ImVec2 position = {
+        (io.DisplaySize.x - text_size.x) * 0.5f,
+        20.0f
+    };
+
+    ImGui::GetForegroundDrawList()->AddText(
+        position,
+        IM_COL32(255, 255, 255, 255),
+        text
+    );
+}
 void drawInterface() {
     ImGui::SetNextWindowSize(
         ImVec2(320.0f, 180.0f),
         ImGuiCond_FirstUseEver
     );
-	
+
 	ImGui::Begin("Menu");
 
 	if (ImGui::Button("Reset cam pos")) {
@@ -403,6 +483,53 @@ void drawInterface() {
 	if (ImGui::RadioButton(
 			"Orthographic", projection_type == ProjectionType::Orthographic)) {
 		projection_type = ProjectionType::Orthographic;
+	}
+
+	ImGui::SeparatorText("Pyramid transform");
+	ImGui::DragFloat3("Position", &pyramid_position.x, 0.01f);
+	ImGui::DragFloat3(
+		"Rotation", &pyramid_rotation_degrees.x,
+		1.0f, -180.0f, 180.0f, "%.1f deg");
+	ImGui::DragFloat3(
+		"Scale", &pyramid_scale.x,
+		0.01f, 0.01f, 5.0f);
+
+	ImGui::SeparatorText("Face color tints");
+	bool colors_changed = false;
+	colors_changed |= ImGui::ColorEdit3("Front", &face_colors[0].x);
+	colors_changed |= ImGui::ColorEdit3("Right", &face_colors[1].x);
+	colors_changed |= ImGui::ColorEdit3("Back", &face_colors[2].x);
+	colors_changed |= ImGui::ColorEdit3("Left", &face_colors[3].x);
+	colors_changed |= ImGui::ColorEdit3("Base", &face_colors[4].x);
+
+	if (colors_changed) {
+		applyFaceColorsToVertices();
+		vertex_colors_dirty = true;
+	}
+
+	if (ImGui::Button("Rotation")) {
+		pyramid_rotates ^= 1;
+	}
+	ImGui::DragFloat("FOV", &perspective_fov_degrees, 1.0f, 10.0f, 170.0f, "%.1f deg");
+
+	ImGui::SeparatorText("Animation");
+	if (ImGui::Button(
+			jump_animation_active ? "Jumping..." : "Jump and flip") &&
+		!jump_animation_active) {
+		jump_animation_active = true;
+		jump_on_pause = false;
+		jump_animation_time = 0.0f;
+	}
+
+	if (jump_animation_active) {
+		if (ImGui::Button("Pause/Resume")) {
+			jump_on_pause ^= 1;
+		}
+	}
+
+	if (!jump_animation_active || (jump_animation_active && jump_on_pause)) {
+		ImGui::DragFloat("Jump Height", &jump_height, .1f, 1.5f, 10.0f, "%.3f");
+		ImGui::DragFloat("Duration", &jump_duration, .1f, 2.0f, 10.0f, "%.3fs");
 	}
 
 	ImGui::End();
@@ -473,13 +600,42 @@ void update(double time) {
 		}
 	}
 
-	rotation_angle = static_cast<float>(time) * 0.8f;
+	if (pyramid_rotates) {
+		rotation_angle += delta_time * 0.8f;
+	}
+
+	if (jump_animation_active && jump_on_pause) {
+		drawOverlay("SWAG is on Pause");
+	}
+
+	if (jump_animation_active && !jump_on_pause) {
+		drawOverlay("SWAG");
+		jump_animation_time += delta_time;
+
+		const float t = glm::clamp(
+			jump_animation_time / jump_duration, 0.0f, 1.0f);
+
+		jump_height_offset = 4.0f * jump_height * t * (1.0f - t);
+
+		const float smooth_t = t * t * (3.0f - 2.0f * t);
+		somersault_angle = glm::radians(360.0f) * smooth_t;
+
+		if (t >= 1.0f) {
+			jump_animation_active = false;
+			jump_animation_time = 0.0f;
+			jump_height_offset = 0.0f;
+			somersault_angle = 0.0f;
+		}
+	}
 
 	drawInterface();
 }
 
 void render(const graphics::internal::FrameData& fd) {
 	auto& context = graphics::internal::context;
+	if (vertex_colors_dirty && uploadVertices()) {
+		vertex_colors_dirty = false;
+	}
 
 	if (vkResetCommandBuffer(fd.command_buffer, 0) != VK_SUCCESS) {
 		std::cerr << "Failed to reset Vulkan command buffer\n";
@@ -533,8 +689,23 @@ void render(const graphics::internal::FrameData& fd) {
 	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1,
 	                       &vertex_buffer, &vertex_buffer_offset);
 
-	const glm::mat4 model = glm::rotate(
-		glm::mat4(1.0f), rotation_angle, glm::vec3(0.0f, 1.0f, 0.0f));
+	const glm::vec3 animated_position =
+		pyramid_position + glm::vec3(0.0f, jump_height_offset, 0.0f);
+
+	glm::mat4 model = glm::translate(glm::mat4(1.0f), animated_position);
+	model = glm::rotate(
+		model,
+		glm::radians(pyramid_rotation_degrees.x) + somersault_angle,
+		glm::vec3(1.0f, 0.0f, 0.0f));
+	model = glm::rotate(
+		model,
+		glm::radians(pyramid_rotation_degrees.y) + rotation_angle,
+		glm::vec3(0.0f, 1.0f, 0.0f));
+	model = glm::rotate(
+		model,
+		glm::radians(pyramid_rotation_degrees.z),
+		glm::vec3(0.0f, 0.0f, 1.0f));
+	model = glm::scale(model, pyramid_scale);
 
 	const glm::mat4 view = glm::lookAt(
 		camera_position,
