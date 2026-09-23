@@ -9,9 +9,7 @@ This project uses C++20 standard and thus requires either of those compilers:
 - Clang 10
 - Microsoft Visual Studio 2019
 
-This is officially tested on *Windows* and *GNU/Linux platforms*, no *macOS* support yet.
-If you have a working macOS solution of this code, consider submitting a PR so others
-can build this example code without a hassle!
+This is officially tested on *Windows* and *GNU/Linux platforms*, *macOS* support included — download SDK and run vkenv.sh (change dir to script).
 
 <ins>**1. Downloading the repository**</ins>
 
