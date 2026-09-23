@@ -21,8 +21,14 @@ namespace application {
 
 namespace {
 
-struct UniformData {
-	alignas(16) glm::mat4 mvp;
+struct SceneUniformData {
+	alignas(16) glm::mat4 view;
+	alignas(16) glm::mat4 projection;
+};
+
+struct ObjectUniformData {
+	alignas(16) glm::mat4 model;
+	alignas(16) glm::vec4 tint;
 };
 
 struct Vertex {
@@ -35,7 +41,20 @@ enum class ProjectionType {
 	Orthographic,
 };
 
-static_assert(sizeof(UniformData) == 64);
+struct RenderObject {
+	glm::vec3 position = {0.0f, 0.0f, 0.0f};
+	glm::vec3 rotation_degrees = {0.0f, 0.0f, 0.0f};
+	glm::vec3 scale = {1.0f, 1.0f, 1.0f};
+	glm::vec4 tint = {1.0f, 1.0f, 1.0f, 1.0f};
+
+	VkBuffer uniform_buffer = VK_NULL_HANDLE;
+	VmaAllocation uniform_buffer_allocation = VK_NULL_HANDLE;
+	void* uniform_buffer_mapped_data = nullptr;
+	VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+};
+
+static_assert(sizeof(SceneUniformData) == 128);
+static_assert(sizeof(ObjectUniformData) == 80);
 static_assert(sizeof(Vertex) == sizeof(float) * 6);
 
 std::array<glm::vec3, 5> face_colors = {{
@@ -80,12 +99,13 @@ std::array<Vertex, 18> vertices = {{
 VkPipelineLayout pipeline_layout;
 VkPipeline graphics_pipeline;
 
-VkDescriptorSetLayout descriptor_set_layout;
+VkDescriptorSetLayout scene_descriptor_set_layout;
+VkDescriptorSetLayout object_descriptor_set_layout;
 VkDescriptorPool descriptor_pool;
-VkDescriptorSet descriptor_set;
-VkBuffer uniform_buffer;
-VmaAllocation uniform_buffer_allocation;
-void* uniform_buffer_mapped_data;
+VkDescriptorSet scene_descriptor_set;
+VkBuffer scene_uniform_buffer;
+VmaAllocation scene_uniform_buffer_allocation;
+void* scene_uniform_buffer_mapped_data;
 
 VkBuffer vertex_buffer;
 VmaAllocation vertex_buffer_allocation;
@@ -93,9 +113,25 @@ void* vertex_buffer_mapped_data;
 bool vertex_colors_dirty = false;
 float rotation_angle = 0.0f;
 
-glm::vec3 pyramid_position = { 0.0f, 0.0f, 0.0f };
-glm::vec3 pyramid_rotation_degrees = { 0.0f, 0.0f, 0.0f };
-glm::vec3 pyramid_scale = { 1.0f, 1.0f, 1.0f };
+constexpr size_t render_object_count = 3;
+std::array<RenderObject, render_object_count> render_objects = {{
+	{
+		.position = {-1.4f, 0.0f, 0.0f},
+		.scale = {0.65f, 0.65f, 0.65f},
+		.tint = {1.0f, 0.65f, 0.65f, 1.0f},
+	},
+	{
+		.position = {0.0f, 0.0f, 0.0f},
+		.tint = {0.75f, 1.0f, 0.75f, 1.0f},
+	},
+	{
+		.position = {1.4f, 0.0f, 0.0f},
+		.scale = {0.65f, 0.65f, 0.65f},
+		.tint = {0.7f, 0.8f, 1.0f, 1.0f},
+	},
+}};
+int selected_object_index = 1;
+size_t animated_object_index = 1;
 
 bool jump_animation_active = false;
 float jump_animation_time = 0.0f;
@@ -217,31 +253,7 @@ bool uploadVertices() {
 	return true;
 }
 
-void destroyDescriptorResources() {
-	auto& context = graphics::internal::context;
-
-	if (descriptor_pool != VK_NULL_HANDLE) {
-		vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
-		descriptor_pool = VK_NULL_HANDLE;
-		descriptor_set = VK_NULL_HANDLE;
-	}
-
-	if (uniform_buffer != VK_NULL_HANDLE) {
-		vmaDestroyBuffer(context.allocator, uniform_buffer, uniform_buffer_allocation);
-		uniform_buffer = VK_NULL_HANDLE;
-		uniform_buffer_allocation = VK_NULL_HANDLE;
-		uniform_buffer_mapped_data = nullptr;
-	}
-
-	if (descriptor_set_layout != VK_NULL_HANDLE) {
-		vkDestroyDescriptorSetLayout(context.device, descriptor_set_layout, nullptr);
-		descriptor_set_layout = VK_NULL_HANDLE;
-	}
-}
-
-bool createDescriptorResources() {
-	auto& context = graphics::internal::context;
-
+bool createUniformDescriptorSetLayout(VkDescriptorSetLayout& layout) {
 	const VkDescriptorSetLayoutBinding uniform_binding = {
 		.binding = 0,
 		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -255,15 +267,20 @@ bool createDescriptorResources() {
 		.pBindings = &uniform_binding,
 	};
 
-	if (vkCreateDescriptorSetLayout(context.device, &layout_info, nullptr,
-	                                &descriptor_set_layout) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan descriptor set layout\n";
-		return false;
-	}
+	return vkCreateDescriptorSetLayout(
+		graphics::internal::context.device,
+		&layout_info, nullptr, &layout) == VK_SUCCESS;
+}
+
+bool createMappedUniformBuffer(VkDeviceSize size,
+	                            VkBuffer& buffer,
+	                            VmaAllocation& allocation,
+	                            void*& mapped_data) {
+	auto& context = graphics::internal::context;
 
 	const VkBufferCreateInfo buffer_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size = sizeof(UniformData),
+		.size = size,
 		.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
@@ -276,23 +293,142 @@ bool createDescriptorResources() {
 
 	VmaAllocationInfo allocation_info = {};
 	if (vmaCreateBuffer(context.allocator, &buffer_info, &allocation_create_info,
-	                    &uniform_buffer, &uniform_buffer_allocation,
-	                    &allocation_info) != VK_SUCCESS ||
+	                    &buffer, &allocation, &allocation_info) != VK_SUCCESS ||
 	    allocation_info.pMappedData == nullptr) {
-		std::cerr << "Failed to create mapped Vulkan uniform buffer\n";
+		if (buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(context.allocator, buffer, allocation);
+			buffer = VK_NULL_HANDLE;
+			allocation = VK_NULL_HANDLE;
+		}
+		return false;
+	}
+
+	mapped_data = allocation_info.pMappedData;
+	return true;
+}
+
+void writeUniformDescriptor(VkDescriptorSet set,
+	                        VkBuffer buffer,
+	                        VkDeviceSize size) {
+	const VkDescriptorBufferInfo buffer_info = {
+		.buffer = buffer,
+		.offset = 0,
+		.range = size,
+	};
+
+	const VkWriteDescriptorSet descriptor_write = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = set,
+		.dstBinding = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+		.pBufferInfo = &buffer_info,
+	};
+
+	vkUpdateDescriptorSets(
+		graphics::internal::context.device,
+		1, &descriptor_write, 0, nullptr);
+}
+
+bool uploadUniformBuffer(VmaAllocation allocation,
+	                     void* mapped_data,
+	                     const void* data,
+	                     size_t size) {
+	if (mapped_data == nullptr) {
+		std::cerr << "Vulkan uniform buffer is not mapped\n";
+		return false;
+	}
+
+	std::memcpy(mapped_data, data, size);
+	if (vmaFlushAllocation(graphics::internal::context.allocator,
+	                       allocation, 0, size) != VK_SUCCESS) {
+		std::cerr << "Failed to flush Vulkan uniform buffer memory\n";
+		return false;
+	}
+
+	return true;
+}
+
+void destroyDescriptorResources() {
+	auto& context = graphics::internal::context;
+
+	if (descriptor_pool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
+		descriptor_pool = VK_NULL_HANDLE;
+		scene_descriptor_set = VK_NULL_HANDLE;
+		for (RenderObject& object : render_objects) {
+			object.descriptor_set = VK_NULL_HANDLE;
+		}
+	}
+
+	if (scene_uniform_buffer != VK_NULL_HANDLE) {
+		vmaDestroyBuffer(context.allocator, scene_uniform_buffer,
+		                 scene_uniform_buffer_allocation);
+		scene_uniform_buffer = VK_NULL_HANDLE;
+		scene_uniform_buffer_allocation = VK_NULL_HANDLE;
+		scene_uniform_buffer_mapped_data = nullptr;
+	}
+
+	for (RenderObject& object : render_objects) {
+		if (object.uniform_buffer != VK_NULL_HANDLE) {
+			vmaDestroyBuffer(context.allocator, object.uniform_buffer,
+			                 object.uniform_buffer_allocation);
+			object.uniform_buffer = VK_NULL_HANDLE;
+			object.uniform_buffer_allocation = VK_NULL_HANDLE;
+			object.uniform_buffer_mapped_data = nullptr;
+		}
+	}
+
+	if (object_descriptor_set_layout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(
+			context.device, object_descriptor_set_layout, nullptr);
+		object_descriptor_set_layout = VK_NULL_HANDLE;
+	}
+	if (scene_descriptor_set_layout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(
+			context.device, scene_descriptor_set_layout, nullptr);
+		scene_descriptor_set_layout = VK_NULL_HANDLE;
+	}
+}
+
+bool createDescriptorResources() {
+	auto& context = graphics::internal::context;
+
+	if (!createUniformDescriptorSetLayout(scene_descriptor_set_layout) ||
+	    !createUniformDescriptorSetLayout(object_descriptor_set_layout)) {
+		std::cerr << "Failed to create Vulkan descriptor set layouts\n";
 		destroyDescriptorResources();
 		return false;
 	}
-	uniform_buffer_mapped_data = allocation_info.pMappedData;
 
+	if (!createMappedUniformBuffer(
+			sizeof(SceneUniformData), scene_uniform_buffer,
+			scene_uniform_buffer_allocation, scene_uniform_buffer_mapped_data)) {
+		std::cerr << "Failed to create Vulkan scene uniform buffer\n";
+		destroyDescriptorResources();
+		return false;
+	}
+
+	for (RenderObject& object : render_objects) {
+		if (!createMappedUniformBuffer(
+				sizeof(ObjectUniformData), object.uniform_buffer,
+				object.uniform_buffer_allocation,
+				object.uniform_buffer_mapped_data)) {
+			std::cerr << "Failed to create Vulkan object uniform buffer\n";
+			destroyDescriptorResources();
+			return false;
+		}
+	}
+
+	const uint32_t descriptor_count = uint32_t(render_objects.size()) + 1;
 	const VkDescriptorPoolSize pool_size = {
 		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.descriptorCount = 1,
+		.descriptorCount = descriptor_count,
 	};
 
 	const VkDescriptorPoolCreateInfo pool_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1,
+		.maxSets = descriptor_count,
 		.poolSizeCount = 1,
 		.pPoolSizes = &pool_size,
 	};
@@ -304,51 +440,46 @@ bool createDescriptorResources() {
 		return false;
 	}
 
-	const VkDescriptorSetAllocateInfo allocate_info = {
+	const VkDescriptorSetAllocateInfo scene_allocate_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
 		.descriptorPool = descriptor_pool,
 		.descriptorSetCount = 1,
-		.pSetLayouts = &descriptor_set_layout,
+		.pSetLayouts = &scene_descriptor_set_layout,
 	};
 
-	if (vkAllocateDescriptorSets(context.device, &allocate_info,
-	                             &descriptor_set) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate Vulkan descriptor set\n";
+	if (vkAllocateDescriptorSets(context.device, &scene_allocate_info,
+	                             &scene_descriptor_set) != VK_SUCCESS) {
+		std::cerr << "Failed to allocate Vulkan scene descriptor set\n";
 		destroyDescriptorResources();
 		return false;
 	}
 
-	const VkDescriptorBufferInfo descriptor_buffer_info = {
-		.buffer = uniform_buffer,
-		.offset = 0,
-		.range = sizeof(UniformData),
+	std::array<VkDescriptorSetLayout, render_object_count> object_layouts;
+	object_layouts.fill(object_descriptor_set_layout);
+	std::array<VkDescriptorSet, render_object_count> object_sets;
+
+	const VkDescriptorSetAllocateInfo object_allocate_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.descriptorPool = descriptor_pool,
+		.descriptorSetCount = uint32_t(object_sets.size()),
+		.pSetLayouts = object_layouts.data(),
 	};
 
-	const VkWriteDescriptorSet descriptor_write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = descriptor_set,
-		.dstBinding = 0,
-		.descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.pBufferInfo = &descriptor_buffer_info,
-	};
-
-	vkUpdateDescriptorSets(context.device, 1, &descriptor_write, 0, nullptr);
-	return true;
-}
-
-bool uploadUniformData(const UniformData& uniform_data) {
-	if (uniform_buffer_mapped_data == nullptr) {
-		std::cerr << "Vulkan uniform buffer is not mapped\n";
+	if (vkAllocateDescriptorSets(context.device, &object_allocate_info,
+	                             object_sets.data()) != VK_SUCCESS) {
+		std::cerr << "Failed to allocate Vulkan object descriptor sets\n";
+		destroyDescriptorResources();
 		return false;
 	}
 
-	std::memcpy(uniform_buffer_mapped_data, &uniform_data, sizeof(uniform_data));
-	if (vmaFlushAllocation(graphics::internal::context.allocator,
-	                       uniform_buffer_allocation,
-	                       0, sizeof(uniform_data)) != VK_SUCCESS) {
-		std::cerr << "Failed to flush Vulkan uniform buffer memory\n";
-		return false;
+	writeUniformDescriptor(
+		scene_descriptor_set, scene_uniform_buffer, sizeof(SceneUniformData));
+	for (size_t i = 0; i < render_objects.size(); ++i) {
+		render_objects[i].descriptor_set = object_sets[i];
+		writeUniformDescriptor(
+			render_objects[i].descriptor_set,
+			render_objects[i].uniform_buffer,
+			sizeof(ObjectUniformData));
 	}
 
 	return true;
@@ -525,10 +656,16 @@ bool initialize(GLFWwindow* window) {
 		.pDynamicStates = dynamic_states,
 	};
 
+	const VkDescriptorSetLayout descriptor_set_layouts[] = {
+		scene_descriptor_set_layout,
+		object_descriptor_set_layout,
+	};
+
 	const VkPipelineLayoutCreateInfo pipeline_layout_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-		.setLayoutCount = 1,
-		.pSetLayouts = &descriptor_set_layout,
+		.setLayoutCount = uint32_t(
+			sizeof(descriptor_set_layouts) / sizeof(descriptor_set_layouts[0])),
+		.pSetLayouts = descriptor_set_layouts,
 	};
 
 	if (vkCreatePipelineLayout(context.device, &pipeline_layout_info, nullptr,
@@ -634,14 +771,21 @@ void drawInterface() {
 		projection_type = ProjectionType::Orthographic;
 	}
 
-	ImGui::SeparatorText("Pyramid transform");
-	ImGui::DragFloat3("Position", &pyramid_position.x, 0.01f);
+	const char* object_names[] = {"Left", "Center", "Right"};
+	ImGui::Combo(
+		"Object", &selected_object_index,
+		object_names, int(sizeof(object_names) / sizeof(object_names[0])));
+	RenderObject& selected_object = render_objects[size_t(selected_object_index)];
+
+	ImGui::SeparatorText("Selected object");
+	ImGui::DragFloat3("Position", &selected_object.position.x, 0.01f);
 	ImGui::DragFloat3(
-		"Rotation", &pyramid_rotation_degrees.x,
+		"Rotation", &selected_object.rotation_degrees.x,
 		1.0f, -180.0f, 180.0f, "%.1f deg");
 	ImGui::DragFloat3(
-		"Scale", &pyramid_scale.x,
+		"Scale", &selected_object.scale.x,
 		0.01f, 0.01f, 5.0f);
+	ImGui::ColorEdit3("Object tint", &selected_object.tint.x);
 
 	ImGui::SeparatorText("Face color tints");
 	bool colors_changed = false;
@@ -668,6 +812,7 @@ void drawInterface() {
 		jump_animation_active = true;
 		jump_on_pause = false;
 		jump_animation_time = 0.0f;
+		animated_object_index = size_t(selected_object_index);
 	}
 
 	if (jump_animation_active) {
@@ -838,24 +983,6 @@ void render(const graphics::internal::FrameData& fd) {
 	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1,
 	                       &vertex_buffer, &vertex_buffer_offset);
 
-	const glm::vec3 animated_position =
-		pyramid_position + glm::vec3(0.0f, jump_height_offset, 0.0f);
-
-	glm::mat4 model = glm::translate(glm::mat4(1.0f), animated_position);
-	model = glm::rotate(
-		model,
-		glm::radians(pyramid_rotation_degrees.x) + somersault_angle,
-		glm::vec3(1.0f, 0.0f, 0.0f));
-	model = glm::rotate(
-		model,
-		glm::radians(pyramid_rotation_degrees.y) + rotation_angle,
-		glm::vec3(0.0f, 1.0f, 0.0f));
-	model = glm::rotate(
-		model,
-		glm::radians(pyramid_rotation_degrees.z),
-		glm::vec3(0.0f, 0.0f, 1.0f));
-	model = glm::scale(model, pyramid_scale);
-
 	const glm::mat4 view = glm::lookAt(
 		camera_position,
 		camera_position + camera_forward,
@@ -880,18 +1007,67 @@ void render(const graphics::internal::FrameData& fd) {
 	}
 	projection[1][1] *= -1.0f;
 
-	const UniformData uniform_data = {
-		.mvp = projection * view * model,
+	const SceneUniformData scene_uniform_data = {
+		.view = view,
+		.projection = projection,
 	};
-	uploadUniformData(uniform_data);
+	uploadUniformBuffer(
+		scene_uniform_buffer_allocation,
+		scene_uniform_buffer_mapped_data,
+		&scene_uniform_data,
+		sizeof(scene_uniform_data));
 
 	vkCmdBindDescriptorSets(
 		fd.command_buffer,
 		VK_PIPELINE_BIND_POINT_GRAPHICS,
 		pipeline_layout,
-		0, 1, &descriptor_set,
+		0, 1, &scene_descriptor_set,
 		0, nullptr);
-	vkCmdDraw(fd.command_buffer, uint32_t(vertices.size()), 1, 0, 0);
+
+	for (size_t object_index = 0;
+	     object_index < render_objects.size();
+	     ++object_index) {
+		RenderObject& object = render_objects[object_index];
+		glm::vec3 position = object.position;
+		float object_somersault_angle = 0.0f;
+		if (object_index == animated_object_index) {
+			position.y += jump_height_offset;
+			object_somersault_angle = somersault_angle;
+		}
+
+		glm::mat4 model = glm::translate(glm::mat4(1.0f), position);
+		model = glm::rotate(
+			model,
+			glm::radians(object.rotation_degrees.x) + object_somersault_angle,
+			glm::vec3(1.0f, 0.0f, 0.0f));
+		model = glm::rotate(
+			model,
+			glm::radians(object.rotation_degrees.y) + rotation_angle,
+			glm::vec3(0.0f, 1.0f, 0.0f));
+		model = glm::rotate(
+			model,
+			glm::radians(object.rotation_degrees.z),
+			glm::vec3(0.0f, 0.0f, 1.0f));
+		model = glm::scale(model, object.scale);
+
+		const ObjectUniformData object_uniform_data = {
+			.model = model,
+			.tint = object.tint,
+		};
+		uploadUniformBuffer(
+			object.uniform_buffer_allocation,
+			object.uniform_buffer_mapped_data,
+			&object_uniform_data,
+			sizeof(object_uniform_data));
+
+		vkCmdBindDescriptorSets(
+			fd.command_buffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline_layout,
+			1, 1, &object.descriptor_set,
+			0, nullptr);
+		vkCmdDraw(fd.command_buffer, uint32_t(vertices.size()), 1, 0, 0);
+	}
 
 	vkCmdEndRenderPass(fd.command_buffer);
 
