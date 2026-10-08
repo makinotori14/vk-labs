@@ -59,7 +59,7 @@ VkCommandPool vk_imgui_command_pool;
 VkCommandBuffer vk_imgui_command_buffer;
 
 VkFormat selectDepthFormat(VkPhysicalDevice physical_device) {
-	// Prefer the original format and preserve stencil support in the fallback.
+	// Сначала проверяем исходный формат; резервный формат также поддерживает трафарет.
 	const VkFormat candidates[] = {
 		VK_FORMAT_D24_UNORM_S8_UINT,
 		VK_FORMAT_D32_SFLOAT_S8_UINT,
@@ -98,7 +98,7 @@ bool initializeImGUI() {
 
 	if (vkCreateDescriptorPool(context.device, &descriptor_pool, nullptr,
 							   &vk_imgui_descriptor_pool) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan descriptor pool for ImGUI rendering\n";
+		std::cerr << "Не удалось создать пул дескрипторов Vulkan для ImGui\n";
 		return false;
 	}
 
@@ -147,7 +147,7 @@ bool initializeImGUI() {
 
 	if (vkCreateRenderPass(context.device, &render_pass, nullptr,
 						   &vk_imgui_render_pass) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan render pass for ImGUI rendering\n";
+		std::cerr << "Не удалось создать проход отрисовки Vulkan для ImGui\n";
 		return false;
 	}
 
@@ -169,7 +169,7 @@ bool initializeImGUI() {
 
 		if (vkCreateFramebuffer(context.device, &framebuffer, nullptr,
 								&vk_imgui_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << " for ImGUI rendering\n";
+			std::cerr << "Не удалось создать кадровый буфер Vulkan №" << i << " для отрисовки ImGui\n";
 			return false;
 		}
 	}
@@ -182,7 +182,7 @@ bool initializeImGUI() {
 
 	if (vkCreateCommandPool(context.device, &command_pool, nullptr,
 							&vk_imgui_command_pool) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan command pool for ImGUI rendering\n";
+		std::cerr << "Не удалось создать пул команд Vulkan для отрисовки ImGui\n";
 		return false;
 	}
 
@@ -195,7 +195,7 @@ bool initializeImGUI() {
 
 	if (vkAllocateCommandBuffers(context.device, &command_buffer,
 								 &vk_imgui_command_buffer) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan command buffer for ImGUI rendering\n";
+		std::cerr << "Failed to create Vulkan command buffer для отрисовки ImGui\n";
 		return false;
 	}
 
@@ -257,6 +257,7 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 					   .build();
 	if (!sb_result) {
 		std::cerr << sb_result.error().message() << '\n';
+		return false;
 	}
 
 	auto vkb_swapchain = sb_result.value();
@@ -303,7 +304,7 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 	if (vmaCreateImage(context.allocator, &depth_buffer, &depth_buffer_allocation,
 					   &vk_image_depth_buffer, &vma_allocation_depth_buffer,
 					   nullptr) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate and create Vulkan image for depth buffer\n";
+		std::cerr << "Не удалось выделить память и создать изображение Vulkan для буфера глубины\n";
 		return false;
 	}
 
@@ -323,7 +324,7 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 
 	if (vkCreateImageView(context.device, &depth_buffer_view, nullptr,
 						  &vk_image_view_depth_buffer) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan image view for depth buffer\n";
+		std::cerr << "Не удалось создать представление изображения Vulkan для буфера глубины\n";
 		return false;
 	}
 
@@ -351,7 +352,7 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 
 		if (vkCreateFramebuffer(context.device, &framebuffer, nullptr,
 								&vk_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << '\n';
+			std::cerr << "Не удалось создать кадровый буфер Vulkan №" << i << '\n';
 			return false;
 		}
 	}
@@ -372,7 +373,22 @@ bool rebuildSwapchain(uint32_t width, uint32_t height) {
 
 		if (vkCreateFramebuffer(context.device, &imgui_framebuffer, nullptr,
 								&vk_imgui_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << " for ImGUI rendering\n";
+			std::cerr << "Не удалось создать кадровый буфер Vulkan №" << i << " для отрисовки ImGui\n";
+			return false;
+		}
+	}
+
+	// После пересоздания цепочки обмена число изображений может измениться.
+	for (VkSemaphore semaphore : vk_semaphores_image_finished) {
+		vkDestroySemaphore(context.device, semaphore, nullptr);
+	}
+	vk_semaphores_image_finished.assign(swapchain_images_count, VK_NULL_HANDLE);
+	const VkSemaphoreCreateInfo semaphore_info = {
+		.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+	};
+	for (VkSemaphore& semaphore : vk_semaphores_image_finished) {
+		if (vkCreateSemaphore(context.device, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) {
+			std::cerr << "Не удалось пересоздать семафор цепочки обмена\n";
 			return false;
 		}
 	}
@@ -418,7 +434,7 @@ bool initialize(GLFWwindow* const window) {
 
 	vk_depth_buffer_format = selectDepthFormat(vkb_physical_device.physical_device);
 	if (vk_depth_buffer_format == VK_FORMAT_UNDEFINED) {
-		std::cerr << "No supported depth/stencil attachment format found\n";
+		std::cerr << "Не найден поддерживаемый формат буфера глубины и трафарета\n";
 		return false;
 	}
 
@@ -457,7 +473,7 @@ bool initialize(GLFWwindow* const window) {
 	};
 
 	if (vmaCreateAllocator(&allocator, &context.allocator) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan Memory Allocator\n";
+		std::cerr << "Не удалось создать распределитель памяти Vulkan\n";
 		return false;
 	}
 
@@ -480,6 +496,8 @@ bool initialize(GLFWwindow* const window) {
 	vk_swapchain_images = vkb_swapchain.get_images().value();
 	vk_swapchain_image_views = vkb_swapchain.get_image_views().value();
 	vk_swapchain_current_image = UINT32_MAX;
+	vk_swapchain_resize_width = context.swapchain_extent.width;
+	vk_swapchain_resize_height = context.swapchain_extent.height;
 
 	const uint32_t swapchain_images_count = uint32_t(vk_swapchain_images.size());
 
@@ -504,7 +522,7 @@ bool initialize(GLFWwindow* const window) {
 	if (vmaCreateImage(context.allocator, &depth_buffer, &depth_buffer_allocation,
 					   &vk_image_depth_buffer, &vma_allocation_depth_buffer,
 					   nullptr) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate and create Vulkan image for depth buffer\n";
+		std::cerr << "Не удалось выделить память и создать изображение Vulkan для буфера глубины\n";
 		return false;
 	}
 
@@ -524,7 +542,7 @@ bool initialize(GLFWwindow* const window) {
 
 	if (vkCreateImageView(context.device, &depth_buffer_view, nullptr,
 						  &vk_image_view_depth_buffer) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan image view for depth buffer\n";
+		std::cerr << "Не удалось создать представление изображения Vulkan для буфера глубины\n";
 		return false;
 	}
 
@@ -577,7 +595,7 @@ bool initialize(GLFWwindow* const window) {
 	};
 
 	if (vkCreateRenderPass(context.device, &render_pass, nullptr, &context.render_pass) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan render pass\n";
+		std::cerr << "Не удалось создать проход отрисовки Vulkan\n";
 		return false;
 	}
 
@@ -603,7 +621,7 @@ bool initialize(GLFWwindow* const window) {
 
 		if (vkCreateFramebuffer(context.device, &framebuffer, nullptr,
 								&vk_framebuffers[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan framebuffer #" << i << '\n';
+			std::cerr << "Не удалось создать кадровый буфер Vulkan №" << i << '\n';
 			return false;
 		}
 	}
@@ -620,19 +638,19 @@ bool initialize(GLFWwindow* const window) {
 	for (uint32_t i = 0; i < swapchain_images_count; ++i) {
 		if (vkCreateSemaphore(context.device, &semaphore, nullptr,
 							  &vk_semaphores_image_finished[i]) != VK_SUCCESS) {
-			std::cerr << "Failed to create Vulkan semaphore #" << i << " for finished image\n";
+			std::cerr << "Не удалось создать семафор Vulkan №" << i << " для готового изображения\n";
 			return false;
 		}
 	}
 
 	if (vkCreateSemaphore(context.device, &semaphore, NULL,
 						  &vk_semaphore_image_available) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan semaphore for available image\n";
+		std::cerr << "Не удалось создать семафор Vulkan для доступного изображения\n";
 		return false;
 	}
 
 	if (vkCreateFence(context.device, &fence, nullptr, &vk_fence_frame_in_flight) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan semaphore for image in flight\n";
+		std::cerr << "Не удалось создать объект синхронизации Vulkan для кадра\n";
 		return false;
 	}
 
@@ -643,7 +661,7 @@ bool initialize(GLFWwindow* const window) {
 	};
 
 	if (vkCreateCommandPool(context.device, &command_pool, nullptr, &vk_command_pool) != VK_SUCCESS) {
-		std::cerr << "Failed to create Vulkan command pool\n";
+		std::cerr << "Не удалось создать пул команд Vulkan\n";
 		return false;
 	}
 
@@ -655,12 +673,12 @@ bool initialize(GLFWwindow* const window) {
 	};
 
 	if (vkAllocateCommandBuffers(context.device, &command_buffers, &vk_command_buffer) != VK_SUCCESS) {
-		std::cerr << "Failed to allocate Vulkan command buffer\n";
+		std::cerr << "Не удалось выделить командный буфер Vulkan\n";
 		return false;
 	}
 
 	if (!initializeImGUI()) {
-		std::cerr << "Failed to initialize ImGUI Vulkan rendering backend\n";
+		std::cerr << "Не удалось инициализировать модуль отрисовки ImGui для Vulkan\n";
 		return false;
 	}
 
@@ -682,8 +700,8 @@ void shutdown() {
 	vkDestroyCommandPool(context.device, vk_command_pool, nullptr);
 
 	vkDestroyFence(context.device, vk_fence_frame_in_flight, nullptr);
-	for (size_t i = 0, n = vk_swapchain_images.size(); i < n; ++i) {
-		vkDestroySemaphore(context.device, vk_semaphores_image_finished[i], nullptr);
+	for (VkSemaphore semaphore : vk_semaphores_image_finished) {
+		vkDestroySemaphore(context.device, semaphore, nullptr);
 	}
 	vkDestroySemaphore(context.device, vk_semaphore_image_available, nullptr);
 
@@ -730,15 +748,17 @@ retry_acquire:
 		break;
 
 	case VK_ERROR_OUT_OF_DATE_KHR:
-		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
+		if (!rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height)) {
+			return {};
+		}
 		goto retry_acquire;
 
 	case VK_SUBOPTIMAL_KHR:
-		std::cerr << "Swapchain is suboptimal for rendering!\n";
+		std::cerr << "Цепочка обмена не оптимальна для отрисовки!\n";
 		break;
 
 	default:
-		std::cerr << "Failed to present Vulkan swapchain image\n";
+		std::cerr << "Не удалось показать изображение цепочки обмена Vulkan\n";
 		return {};
 	}
 
@@ -786,8 +806,8 @@ void submitAndPresent() {
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
-		std::cerr << "Failed to present Vulkan swapchain image\n";
+	} else if (result != VK_SUCCESS) {
+		std::cerr << "Не удалось показать изображение цепочки обмена Vulkan\n";
 	}
 }
 

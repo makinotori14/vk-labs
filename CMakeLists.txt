@@ -19,10 +19,18 @@ elseif(WIN32)
 	endif()
 	target_compile_definitions(${PROJECT_NAME} PRIVATE -D_USE_MATH_DEFINES)
 else()
-	message(FATAL_ERROR "${CMAKE_SYSTEM_NAME} is not supported")
+	message(FATAL_ERROR "Платформа ${CMAKE_SYSTEM_NAME} не поддерживается")
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 20)
+target_compile_definitions(${PROJECT_NAME} PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
+FetchContent_Declare(
+	glm
+	GIT_REPOSITORY https://github.com/g-truc/glm.git
+	GIT_TAG 1.0.1
+	GIT_SHALLOW TRUE
+)
 
 FetchContent_Declare(
 	glfw
@@ -54,8 +62,10 @@ set(GLFW_LIBRARY_TYPE STATIC)
 set(GLFW_BUILD_EXAMPLES OFF)
 set(GLFW_BUILD_TESTS OFF)
 set(GLFW_BUILD_DOCS OFF)
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "Build GLM as a compiled library" FORCE)
 
 FetchContent_MakeAvailable(
+	glm
 	glfw
 	vk-bootstrap
 	VulkanMemoryAllocator
@@ -63,6 +73,7 @@ FetchContent_MakeAvailable(
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
+	glm::glm-header-only
 	glfw
 	Vulkan::Vulkan
 	vk-bootstrap::vk-bootstrap
@@ -80,7 +91,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 	${imgui_SOURCE_DIR}/imgui_demo.cpp
 )
 
-# Compile shaders
+# Компиляция шейдеров
 find_program(GLSLC_FOUND glslc)
 if(GLSLC_FOUND)
 	set(_SHADER_BINARIES)
@@ -92,20 +103,20 @@ if(GLSLC_FOUND)
 
 		add_custom_command(
 			OUTPUT ${SHADER_BINARY_PATH}
-			COMMAND glslc ${SHADER_SOURCE} -o ${SHADER_BINARY_PATH}
+			COMMAND ${GLSLC_FOUND} ${SHADER_SOURCE} -o ${SHADER_BINARY_PATH}
 			DEPENDS ${SHADER_SOURCE}
-			COMMENT "Compiling ${SHADER_FILE} shader"
+			COMMENT "Компиляция шейдера ${SHADER_FILE}"
+			VERBATIM
 		)
 
 		list(APPEND _SHADER_BINARIES ${SHADER_BINARY_PATH})
 	endmacro()
 
-	# To compile shader file, use compile_shader function with a file name
-	# of a shader inside shaders directory. See example below:
-
-	# compile_shader(example.vert)
-	# compile_shader(example.frag)
+	compile_shader(pyramid.vert)
+	compile_shader(pyramid.frag)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)
+else()
+	message(FATAL_ERROR "Для компиляции шейдеров пирамиды требуется glslc. Установите Vulkan SDK.")
 endif()

@@ -8,6 +8,7 @@
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_vulkan.h>
 
 #include "graphics_internal.hpp"
 #include "application.hpp"
@@ -17,7 +18,7 @@ namespace {
 constexpr int32_t default_window_width = 1280;
 constexpr int32_t default_window_height = 720;
 
-constexpr char default_window_title[] = "Vulkan Starter App";
+constexpr char default_window_title[] = "albert han 207 lab01";
 
 GLFWwindow* glfw_window;
 
@@ -27,7 +28,7 @@ int main() {
 	int status = EXIT_SUCCESS;
 
 	if (!glfwInit()) {
-		std::cerr << "Failed to initialize GLFW\n";
+		std::cerr << "Не удалось инициализировать GLFW\n";
 		return EXIT_FAILURE;
 	}
 
@@ -49,25 +50,25 @@ int main() {
 	});
 
 	if (ImGui::CreateContext() == nullptr) {
-		std::cerr << "Failed to create ImGUI context\n";
+		std::cerr << "Не удалось создать контекст ImGui\n";
 		status = EXIT_FAILURE;
 		goto err_imgui_init;
 	}
 
 	if (!ImGui_ImplGlfw_InitForVulkan(glfw_window, true)) {
-		std::cerr << "Failed to initialize ImGUI GLFW backend for Vulkan renderer\n";
+		std::cerr << "Не удалось инициализировать модуль GLFW для ImGui и Vulkan\n";
 		status = EXIT_FAILURE;
 		goto err_imgui_glfw_init;
 	}
 
 	if (!graphics::internal::initialize(glfw_window)) {
-		std::cerr << "Failed to initialize graphics\n";
+		std::cerr << "Не удалось инициализировать графику\n";
 		status = EXIT_FAILURE;
 		goto err_graphics_init;
 	}
 
 	if (!application::initialize()) {
-		std::cerr << "Failed to initialize application\n";
+		std::cerr << "Не удалось инициализировать приложение\n";
 		status = EXIT_FAILURE;
 		goto err_application_init;
 	}
@@ -76,6 +77,11 @@ int main() {
 		const double time = glfwGetTime();
 
 		glfwPollEvents();
+		if (glfwGetWindowAttrib(glfw_window, GLFW_ICONIFIED)) {
+			glfwWaitEvents();
+			continue;
+		}
+		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 
 		ImGui::NewFrame();
@@ -83,7 +89,15 @@ int main() {
 		ImGui::Render();
 
 		graphics::internal::FrameData fd = graphics::internal::prepare();
-		application::render(fd);
+		if (fd.command_buffer == VK_NULL_HANDLE) {
+			status = EXIT_FAILURE;
+			break;
+		}
+		if (!application::render(fd)) {
+			std::cerr << "Не удалось подготовить команды отрисовки кадра\n";
+			status = EXIT_FAILURE;
+			break;
+		}
 		graphics::internal::submitAndPresent();
 	}
 
@@ -99,5 +113,5 @@ err_imgui_init:
 err_null_window:
 	glfwTerminate();
 
-	return 0;
+	return status;
 }
