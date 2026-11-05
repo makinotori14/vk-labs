@@ -159,10 +159,10 @@ bool createPipeline() {
 	auto& context = graphics::internal::context;
 	VkShaderModule vertex_shader = VK_NULL_HANDLE;
 	VkShaderModule fragment_shader = VK_NULL_HANDLE;
-	if (!loadShader("shaders/pyramid.vert.spv", vertex_shader)) {
+	if (!loadShader(APP_SHADER_DIR "/pyramid.vert.spv", vertex_shader)) {
 		return false;
 	}
-	if (!loadShader("shaders/pyramid.frag.spv", fragment_shader)) {
+	if (!loadShader(APP_SHADER_DIR "/pyramid.frag.spv", fragment_shader)) {
 		vkDestroyShaderModule(context.device, vertex_shader, nullptr);
 		return false;
 	}

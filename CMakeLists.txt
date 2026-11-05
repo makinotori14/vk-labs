@@ -24,6 +24,9 @@ endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_STANDARD 20)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+	APP_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+)
 
 FetchContent_Declare(
 	glm
@@ -99,10 +102,11 @@ if(GLSLC_FOUND)
 	macro(compile_shader SHADER_FILE)
 		set(SHADER_SOURCE ${CMAKE_SOURCE_DIR}/shaders/${SHADER_FILE})
 		set(SHADER_BINARY ${SHADER_FILE}.spv)
-		set(SHADER_BINARY_PATH ${CMAKE_SOURCE_DIR}/shaders/${SHADER_BINARY})
+		set(SHADER_BINARY_PATH ${CMAKE_CURRENT_BINARY_DIR}/shaders/${SHADER_BINARY})
 
 		add_custom_command(
 			OUTPUT ${SHADER_BINARY_PATH}
+			COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/shaders
 			COMMAND ${GLSLC_FOUND} ${SHADER_SOURCE} -o ${SHADER_BINARY_PATH}
 			DEPENDS ${SHADER_SOURCE}
 			COMMENT "Компиляция шейдера ${SHADER_FILE}"
