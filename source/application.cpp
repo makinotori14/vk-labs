@@ -15,50 +15,75 @@ namespace application {
 namespace {
 
 struct Vertex {
-	float position[3];
-	float color[3];
+	glm::vec3 position;
+	glm::vec3 normal;
 };
 
-// Отдельные вершины задают каждой грани сплошной цвет без интерполяции между гранями.
-constexpr Vertex vertices[] = {
-	// Передняя грань.
-	{{-1, -1,  1}, {0.12f, 0.42f, 0.90f}},
-	{{ 1, -1,  1}, {0.12f, 0.42f, 0.90f}},
-	{{ 0,  1,  0}, {0.12f, 0.42f, 0.90f}},
-	// Правая грань.
-	{{ 1, -1,  1}, {0.25f, 0.62f, 1.00f}},
-	{{ 1, -1, -1}, {0.25f, 0.62f, 1.00f}},
-	{{ 0,  1,  0}, {0.25f, 0.62f, 1.00f}},
-	// Задняя грань.
-	{{ 1, -1, -1}, {0.08f, 0.25f, 0.65f}},
-	{{-1, -1, -1}, {0.08f, 0.25f, 0.65f}},
-	{{ 0,  1,  0}, {0.08f, 0.25f, 0.65f}},
-	// Левая грань.
-	{{-1, -1, -1}, {0.40f, 0.72f, 1.00f}},
-	{{-1, -1,  1}, {0.40f, 0.72f, 1.00f}},
-	{{ 0,  1,  0}, {0.40f, 0.72f, 1.00f}},
-	// Основание (два треугольника).
-	{{-1, -1, -1}, {0.04f, 0.14f, 0.40f}},
-	{{ 1, -1, -1}, {0.04f, 0.14f, 0.40f}},
-	{{ 1, -1,  1}, {0.04f, 0.14f, 0.40f}},
-	{{-1, -1, -1}, {0.04f, 0.14f, 0.40f}},
-	{{ 1, -1,  1}, {0.04f, 0.14f, 0.40f}},
-	{{-1, -1,  1}, {0.04f, 0.14f, 0.40f}},
+// Вершины разделены между гранями, чтобы сохранить плоские нормали пирамиды.
+const glm::vec3 positions[] = {
+	{-1, -1,  1}, { 1, -1,  1}, { 0,  1,  0}, // Передняя грань.
+	{ 1, -1,  1}, { 1, -1, -1}, { 0,  1,  0}, // Правая грань.
+	{ 1, -1, -1}, {-1, -1, -1}, { 0,  1,  0}, // Задняя грань.
+	{-1, -1, -1}, {-1, -1,  1}, { 0,  1,  0}, // Левая грань.
+	{-1, -1, -1}, { 1, -1, -1}, { 1, -1,  1}, // Основание.
+	{-1, -1, -1}, { 1, -1,  1}, {-1, -1,  1},
 };
+
+std::vector<Vertex> createVertices() {
+	std::vector<Vertex> vertices;
+	vertices.reserve(std::size(positions));
+	for (size_t i = 0; i < std::size(positions); i += 3) {
+		const glm::vec3 normal = glm::normalize(glm::cross(
+			positions[i + 1] - positions[i], positions[i + 2] - positions[i]));
+		for (size_t j = 0; j < 3; ++j) {
+			vertices.push_back({positions[i + j], normal});
+		}
+	}
+	return vertices;
+}
 
 struct alignas(16) UniformData {
-	glm::mat4 mvp;
+	glm::mat4 model;
+	glm::mat4 view_projection;
+	glm::mat4 normal_matrix;
+	glm::vec4 camera_position;
+	glm::vec4 light_direction_intensity;
+	glm::vec4 light_color;
+	glm::vec4 ambient_color_intensity;
+	glm::vec4 albedo;
+	glm::vec4 specular_shininess;
 };
 
-// Единственная mat4 соответствует блоку std140 в вершинном шейдере.
-static_assert(offsetof(UniformData, mvp) == 0);
-static_assert(sizeof(UniformData) == 64);
+// Все поля совпадают с расположением std140 в обоих шейдерах.
+static_assert(offsetof(UniformData, model) == 0);
+static_assert(offsetof(UniformData, view_projection) == 64);
+static_assert(offsetof(UniformData, normal_matrix) == 128);
+static_assert(offsetof(UniformData, camera_position) == 192);
+static_assert(offsetof(UniformData, light_direction_intensity) == 208);
+static_assert(offsetof(UniformData, light_color) == 224);
+static_assert(offsetof(UniformData, ambient_color_intensity) == 240);
+static_assert(offsetof(UniformData, albedo) == 256);
+static_assert(offsetof(UniformData, specular_shininess) == 272);
+static_assert(sizeof(UniformData) == 288);
 
 struct Controls {
-	int projection = 0; // 0 — перспективная проекция, 1 — ортографическая.
+	int projection = 0;
 	float rotation_degrees = 0.0f;
 	float scale[3] = {1.0f, 1.0f, 1.0f};
 	float translation[3] = {0.0f, 0.0f, 0.0f};
+	float camera_position[3] = {3.0f, 2.2f, 4.5f};
+	float camera_rotation[3] = {-22.13f, 33.69f, 0.0f}; // Pitch, yaw, roll.
+	float fov = 45.0f;
+	float near_plane = 0.1f;
+	float far_plane = 100.0f;
+	float light_rotation[2] = {-45.0f, -35.0f}; // Наклон и азимут лучей.
+	float light_color[3] = {1.0f, 1.0f, 1.0f};
+	float light_intensity = 1.0f;
+	float ambient_color[3] = {1.0f, 1.0f, 1.0f};
+	float ambient_intensity = 0.1f;
+	float albedo[3] = {0.12f, 0.42f, 0.90f};
+	float specular[3] = {0.5f, 0.5f, 0.5f};
+	float shininess = 32.0f;
 };
 
 VkBuffer vertex_buffer;
@@ -72,6 +97,14 @@ VkDescriptorSet descriptor_set;
 VkPipelineLayout pipeline_layout;
 VkPipeline pipeline;
 Controls controls;
+
+// Углы задают ненулевое единичное направление распространения света.
+glm::vec3 lightDirection() {
+	const float pitch = glm::radians(controls.light_rotation[0]);
+	const float yaw = glm::radians(controls.light_rotation[1]);
+	return {glm::cos(pitch) * glm::sin(yaw), glm::sin(pitch),
+	        -glm::cos(pitch) * glm::cos(yaw)};
+}
 
 bool createUniformResources() {
 	auto& context = graphics::internal::context;
@@ -93,7 +126,7 @@ bool createUniformResources() {
 
 	const VkDescriptorSetLayoutBinding binding = {
 		.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+		.descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 	};
 	const VkDescriptorSetLayoutCreateInfo layout_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -178,7 +211,7 @@ bool createPipeline() {
 	};
 	const VkVertexInputAttributeDescription attributes[] = {
 		{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, position)},
-		{.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, color)},
+		{.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
 	};
 	const VkPipelineVertexInputStateCreateInfo vertex_input = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -240,10 +273,12 @@ bool createPipeline() {
 } // namespace
 
 bool initialize() {
+	const auto vertices = createVertices();
+	const VkDeviceSize vertex_data_size = vertices.size() * sizeof(Vertex);
 	auto& context = graphics::internal::context;
 	const VkBufferCreateInfo buffer_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size = sizeof(vertices), .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		.size = vertex_data_size, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
 	const VmaAllocationCreateInfo allocation_info = {
@@ -256,14 +291,14 @@ bool initialize() {
 		std::cerr << "Не удалось создать буфер вершин пирамиды\n";
 		return false;
 	}
-	std::memcpy(allocation.pMappedData, vertices, sizeof(vertices));
-	if (vmaFlushAllocation(context.allocator, vertex_allocation, 0, sizeof(vertices)) != VK_SUCCESS) {
+	std::memcpy(allocation.pMappedData, vertices.data(), vertex_data_size);
+	if (vmaFlushAllocation(context.allocator, vertex_allocation, 0, vertex_data_size) != VK_SUCCESS) {
 		shutdown();
 		return false;
 	}
 
 	if (!createUniformResources()) {
-		std::cerr << "Не удалось создать uniform buffer и дескрипторы MVP\n";
+		std::cerr << "Не удалось создать uniform buffer и дескрипторы сцены\n";
 		shutdown();
 		return false;
 	}
@@ -305,20 +340,38 @@ void shutdown() {
 
 void update([[maybe_unused]] double time) {
 	ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(380, 0), ImGuiCond_FirstUseEver);
-	ImGui::Begin("Pyramid", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-	ImGui::Combo("Projection", &controls.projection, "Perspective\0Orthographic\0");
-	ImGui::SliderFloat("Rotation", &controls.rotation_degrees, 0.0f, 360.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
-
-	ImGui::SeparatorText("Proportions");
-	ImGui::SliderFloat("Width (X)", &controls.scale[0], 0.1f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat("Height (Y)", &controls.scale[1], 0.1f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat("Depth (Z)", &controls.scale[2], 0.1f, 3.0f, "%.2fx", ImGuiSliderFlags_AlwaysClamp);
-
-	ImGui::SeparatorText("Position");
-	ImGui::SliderFloat("X", &controls.translation[0], -3.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat("Y", &controls.translation[1], -3.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-	ImGui::SliderFloat("Z", &controls.translation[2], -3.0f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	ImGui::SetNextWindowSize(ImVec2(410, 620), ImGuiCond_FirstUseEver);
+	ImGui::Begin("Pyramid - Camera and lighting");
+	if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::DragFloat3("Camera position", controls.camera_position, 0.05f);
+		ImGui::SliderFloat("Pitch", &controls.camera_rotation[0], -180.0f, 180.0f, "%.1f deg");
+		ImGui::SliderFloat("Yaw", &controls.camera_rotation[1], -180.0f, 180.0f, "%.1f deg");
+		ImGui::SliderFloat("Roll", &controls.camera_rotation[2], -180.0f, 180.0f, "%.1f deg");
+		ImGui::Combo("Projection", &controls.projection, "Perspective\0Orthographic\0");
+		ImGui::SliderFloat("Field of view", &controls.fov, 10.0f, 120.0f, "%.1f deg", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::DragFloat("Near plane", &controls.near_plane, 0.01f, 0.01f, controls.far_plane - 0.01f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::DragFloat("Far plane", &controls.far_plane, 0.5f, controls.near_plane + 0.01f, 1000.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	}
+	if (ImGui::CollapsingHeader("Directional light", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::SliderFloat("Light pitch", &controls.light_rotation[0], -90.0f, 90.0f, "%.1f deg");
+		ImGui::SliderFloat("Light yaw", &controls.light_rotation[1], -180.0f, 180.0f, "%.1f deg");
+		ImGui::ColorEdit3("Light color", controls.light_color);
+		ImGui::SliderFloat("Light intensity", &controls.light_intensity, 0.0f, 5.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	}
+	if (ImGui::CollapsingHeader("Ambient light", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::ColorEdit3("Ambient color", controls.ambient_color);
+		ImGui::SliderFloat("Ambient intensity", &controls.ambient_intensity, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+	}
+	if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+		ImGui::ColorEdit3("Albedo", controls.albedo);
+		ImGui::ColorEdit3("Specular color", controls.specular);
+		ImGui::SliderFloat("Shininess", &controls.shininess, 1.0f, 256.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
+	}
+	if (ImGui::CollapsingHeader("Model")) {
+		ImGui::SliderFloat("Rotation", &controls.rotation_degrees, 0.0f, 360.0f, "%.1f deg");
+		ImGui::SliderFloat3("Scale", controls.scale, 0.1f, 3.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
+		ImGui::SliderFloat3("Position", controls.translation, -3.0f, 3.0f, "%.2f");
+	}
 	if (ImGui::Button("Reset")) {
 		controls = {};
 	}
@@ -329,16 +382,29 @@ bool render(const graphics::internal::FrameData& fd) {
 	auto& context = graphics::internal::context;
 	// prepare() уже дождался fence предыдущего кадра. При одном кадре в работе
 	// GPU больше не читает этот UBO, и его можно безопасно обновить.
+	const glm::mat4 model = calculateModel(
+		glm::vec3(controls.scale[0], controls.scale[1], controls.scale[2]),
+		glm::vec3(controls.translation[0], controls.translation[1], controls.translation[2]),
+		controls.rotation_degrees);
+	const glm::vec3 eye(controls.camera_position[0], controls.camera_position[1], controls.camera_position[2]);
 	const UniformData uniforms = {
-		.mvp = calculateMvp(
-			glm::vec3(controls.scale[0], controls.scale[1], controls.scale[2]),
-			glm::vec3(controls.translation[0], controls.translation[1], controls.translation[2]),
-			controls.rotation_degrees, controls.projection == 1,
+		.model = model,
+		.view_projection = calculateViewProjection(eye,
+			glm::vec3(controls.camera_rotation[0], controls.camera_rotation[1], controls.camera_rotation[2]),
+			controls.fov, controls.near_plane, controls.far_plane, controls.projection == 1,
 			float(context.swapchain_extent.width) / float(context.swapchain_extent.height)),
+		// Обратная транспонированная матрица сохраняет нормали при неравномерном масштабе.
+		.normal_matrix = glm::transpose(glm::inverse(model)),
+		.camera_position = glm::vec4(eye, 1.0f),
+		.light_direction_intensity = glm::vec4(lightDirection(), controls.light_intensity),
+		.light_color = glm::vec4(controls.light_color[0], controls.light_color[1], controls.light_color[2], 0.0f),
+		.ambient_color_intensity = glm::vec4(controls.ambient_color[0], controls.ambient_color[1], controls.ambient_color[2], controls.ambient_intensity),
+		.albedo = glm::vec4(controls.albedo[0], controls.albedo[1], controls.albedo[2], 0.0f),
+		.specular_shininess = glm::vec4(controls.specular[0], controls.specular[1], controls.specular[2], controls.shininess),
 	};
 	std::memcpy(uniform_mapped_data, &uniforms, sizeof(uniforms));
 	if (vmaFlushAllocation(context.allocator, uniform_allocation, 0, sizeof(uniforms)) != VK_SUCCESS) {
-		std::cerr << "Не удалось обновить uniform buffer MVP\n";
+		std::cerr << "Не удалось обновить uniform buffer сцены\n";
 		return false;
 	}
 	if (vkResetCommandBuffer(fd.command_buffer, 0) != VK_SUCCESS) {
@@ -374,7 +440,7 @@ bool render(const graphics::internal::FrameData& fd) {
 	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vertex_buffer, &offset);
 	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
 	                        pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
-	vkCmdDraw(fd.command_buffer, uint32_t(std::size(vertices)), 1, 0, 0);
+	vkCmdDraw(fd.command_buffer, uint32_t(std::size(positions)), 1, 0, 0);
 	vkCmdEndRenderPass(fd.command_buffer);
 	return vkEndCommandBuffer(fd.command_buffer) == VK_SUCCESS;
 }

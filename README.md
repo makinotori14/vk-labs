@@ -1,6 +1,6 @@
-# CG Lab01
+# CG Lab02
 
-Вариант 6 — Пирамида
+Вариант 6 — Пирамид
 
 ```bash
 cmake --preset debug
