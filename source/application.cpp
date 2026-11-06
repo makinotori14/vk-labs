@@ -1,6 +1,8 @@
 #include "application.hpp"
 #include "transforms.hpp"
+#include "gpu_resources.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -17,6 +19,7 @@ namespace {
 struct Vertex {
 	glm::vec3 position;
 	glm::vec3 normal;
+	glm::vec2 uv;
 };
 
 // Вершины разделены между гранями, чтобы сохранить плоские нормали пирамиды.
@@ -29,17 +32,34 @@ const glm::vec3 positions[] = {
 	{-1, -1, -1}, { 1, -1,  1}, {-1, -1,  1},
 };
 
-std::vector<Vertex> createVertices() {
+struct Mesh {
 	std::vector<Vertex> vertices;
-	vertices.reserve(std::size(positions));
+	std::vector<uint32_t> indices;
+};
+
+Mesh createMesh() {
+	Mesh mesh;
+	const glm::vec2 side_uv[] = {{0, 1}, {1, 1}, {0.5f, 0}};
 	for (size_t i = 0; i < std::size(positions); i += 3) {
 		const glm::vec3 normal = glm::normalize(glm::cross(
 			positions[i + 1] - positions[i], positions[i + 2] - positions[i]));
 		for (size_t j = 0; j < 3; ++j) {
-			vertices.push_back({positions[i + j], normal});
+			const auto position = positions[i + j];
+			// Боковые грани получают треугольную развёртку; основание — плоскую по XZ.
+			const glm::vec2 uv = i < 12 ? side_uv[j]
+				: glm::vec2((position.x + 1.0f) * 0.5f, (1.0f - position.z) * 0.5f);
+			const auto found = std::find_if(mesh.vertices.begin(), mesh.vertices.end(),
+				[&](const Vertex& vertex) {
+					return vertex.position == position && vertex.normal == normal && vertex.uv == uv;
+				});
+			const auto index = uint32_t(found - mesh.vertices.begin());
+			if (found == mesh.vertices.end()) {
+				mesh.vertices.push_back({position, normal, uv});
+			}
+			mesh.indices.push_back(index);
 		}
 	}
-	return vertices;
+	return mesh;
 }
 
 struct alignas(16) UniformData {
@@ -50,7 +70,6 @@ struct alignas(16) UniformData {
 	glm::vec4 light_direction_intensity;
 	glm::vec4 light_color;
 	glm::vec4 ambient_color_intensity;
-	glm::vec4 albedo;
 	glm::vec4 specular_shininess;
 };
 
@@ -62,9 +81,8 @@ static_assert(offsetof(UniformData, camera_position) == 192);
 static_assert(offsetof(UniformData, light_direction_intensity) == 208);
 static_assert(offsetof(UniformData, light_color) == 224);
 static_assert(offsetof(UniformData, ambient_color_intensity) == 240);
-static_assert(offsetof(UniformData, albedo) == 256);
-static_assert(offsetof(UniformData, specular_shininess) == 272);
-static_assert(sizeof(UniformData) == 288);
+static_assert(offsetof(UniformData, specular_shininess) == 256);
+static_assert(sizeof(UniformData) == 272);
 
 struct Controls {
 	int projection = 0;
@@ -81,13 +99,17 @@ struct Controls {
 	float light_intensity = 1.0f;
 	float ambient_color[3] = {1.0f, 1.0f, 1.0f};
 	float ambient_intensity = 0.1f;
-	float albedo[3] = {0.12f, 0.42f, 0.90f};
 	float specular[3] = {0.5f, 0.5f, 0.5f};
 	float shininess = 32.0f;
 };
 
-VkBuffer vertex_buffer;
-VmaAllocation vertex_allocation;
+graphics::resources::Buffer vertex_buffer;
+graphics::resources::Buffer index_buffer;
+graphics::resources::Texture albedo_texture;
+uint32_t index_count;
+VkDeviceSize uniform_stride;
+// В сцене одна пирамида; массив UBO содержит один элемент с выровненным шагом.
+constexpr uint32_t model_count = 1;
 VkBuffer uniform_buffer;
 VmaAllocation uniform_allocation;
 void* uniform_mapped_data;
@@ -108,9 +130,13 @@ glm::vec3 lightDirection() {
 
 bool createUniformResources() {
 	auto& context = graphics::internal::context;
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(context.physical_device, &properties);
+	const VkDeviceSize alignment = properties.limits.minUniformBufferOffsetAlignment;
+	uniform_stride = (sizeof(UniformData) + alignment - 1) / alignment * alignment;
 	const VkBufferCreateInfo buffer_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size = sizeof(UniformData), .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+		.size = uniform_stride * model_count, .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 	};
 	const VmaAllocationCreateInfo allocation_info = {
@@ -124,23 +150,26 @@ bool createUniformResources() {
 	}
 	uniform_mapped_data = allocation.pMappedData;
 
-	const VkDescriptorSetLayoutBinding binding = {
-		.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-		.descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+	const VkDescriptorSetLayoutBinding bindings[] = {
+		{.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+		 .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
+		{.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		 .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
 	};
 	const VkDescriptorSetLayoutCreateInfo layout_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		.bindingCount = 1, .pBindings = &binding,
+		.bindingCount = uint32_t(std::size(bindings)), .pBindings = bindings,
 	};
 	if (vkCreateDescriptorSetLayout(context.device, &layout_info, nullptr, &descriptor_set_layout) != VK_SUCCESS) {
 		return false;
 	}
-	const VkDescriptorPoolSize pool_size = {
-		.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1,
+	const VkDescriptorPoolSize pool_sizes[] = {
+		{.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = 1},
+		{.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1},
 	};
 	const VkDescriptorPoolCreateInfo pool_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &pool_size,
+		.maxSets = 1, .poolSizeCount = uint32_t(std::size(pool_sizes)), .pPoolSizes = pool_sizes,
 	};
 	if (vkCreateDescriptorPool(context.device, &pool_info, nullptr, &descriptor_pool) != VK_SUCCESS) {
 		return false;
@@ -155,12 +184,19 @@ bool createUniformResources() {
 	const VkDescriptorBufferInfo descriptor_buffer = {
 		.buffer = uniform_buffer, .offset = 0, .range = sizeof(UniformData),
 	};
-	const VkWriteDescriptorSet write = {
-		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-		.dstSet = descriptor_set, .dstBinding = 0, .descriptorCount = 1,
-		.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &descriptor_buffer,
+	const VkDescriptorImageInfo descriptor_image = {
+		.sampler = albedo_texture.sampler, .imageView = albedo_texture.view,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	};
-	vkUpdateDescriptorSets(context.device, 1, &write, 0, nullptr);
+	const VkWriteDescriptorSet writes[] = {
+		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		 .dstSet = descriptor_set, .dstBinding = 0, .descriptorCount = 1,
+		 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pBufferInfo = &descriptor_buffer},
+		{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		 .dstSet = descriptor_set, .dstBinding = 1, .descriptorCount = 1,
+		 .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &descriptor_image},
+	};
+	vkUpdateDescriptorSets(context.device, uint32_t(std::size(writes)), writes, 0, nullptr);
 	return true;
 }
 
@@ -212,6 +248,7 @@ bool createPipeline() {
 	const VkVertexInputAttributeDescription attributes[] = {
 		{.location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, position)},
 		{.location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(Vertex, normal)},
+		{.location = 2, .binding = 0, .format = VK_FORMAT_R32G32_SFLOAT, .offset = offsetof(Vertex, uv)},
 	};
 	const VkPipelineVertexInputStateCreateInfo vertex_input = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -273,26 +310,19 @@ bool createPipeline() {
 } // namespace
 
 bool initialize() {
-	const auto vertices = createVertices();
-	const VkDeviceSize vertex_data_size = vertices.size() * sizeof(Vertex);
+	const auto mesh = createMesh();
+	index_count = uint32_t(mesh.indices.size());
 	auto& context = graphics::internal::context;
-	const VkBufferCreateInfo buffer_info = {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-		.size = vertex_data_size, .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-	};
-	const VmaAllocationCreateInfo allocation_info = {
-		.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
-		.usage = VMA_MEMORY_USAGE_AUTO,
-	};
-	VmaAllocationInfo allocation{};
-	if (vmaCreateBuffer(context.allocator, &buffer_info, &allocation_info,
-	                    &vertex_buffer, &vertex_allocation, &allocation) != VK_SUCCESS) {
-		std::cerr << "Не удалось создать буфер вершин пирамиды\n";
+	if (!graphics::resources::uploadBuffer(mesh.vertices.data(), mesh.vertices.size() * sizeof(Vertex),
+	                                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer) ||
+	    !graphics::resources::uploadBuffer(mesh.indices.data(), mesh.indices.size() * sizeof(uint32_t),
+	                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT, index_buffer)) {
+		std::cerr << "Не удалось загрузить вершины и индексы пирамиды в GPU\n";
+		shutdown();
 		return false;
 	}
-	std::memcpy(allocation.pMappedData, vertices.data(), vertex_data_size);
-	if (vmaFlushAllocation(context.allocator, vertex_allocation, 0, vertex_data_size) != VK_SUCCESS) {
+	if (!graphics::resources::loadTexture(APP_TEXTURE_DIR "/checker.png", albedo_texture)) {
+		std::cerr << "Не удалось создать текстуру альбедо\n";
 		shutdown();
 		return false;
 	}
@@ -325,11 +355,11 @@ void shutdown() {
 	if (uniform_buffer != VK_NULL_HANDLE) {
 		vmaDestroyBuffer(context.allocator, uniform_buffer, uniform_allocation);
 	}
-	vmaDestroyBuffer(context.allocator, vertex_buffer, vertex_allocation);
+	graphics::resources::destroy(vertex_buffer);
+	graphics::resources::destroy(index_buffer);
+	graphics::resources::destroy(albedo_texture);
 	pipeline = VK_NULL_HANDLE;
 	pipeline_layout = VK_NULL_HANDLE;
-	vertex_buffer = VK_NULL_HANDLE;
-	vertex_allocation = VK_NULL_HANDLE;
 	uniform_buffer = VK_NULL_HANDLE;
 	uniform_allocation = VK_NULL_HANDLE;
 	uniform_mapped_data = nullptr;
@@ -341,7 +371,7 @@ void shutdown() {
 void update([[maybe_unused]] double time) {
 	ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSize(ImVec2(410, 620), ImGuiCond_FirstUseEver);
-	ImGui::Begin("Pyramid - Camera and lighting");
+	ImGui::Begin("Pyramid - Texture mapping");
 	if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
 		ImGui::DragFloat3("Camera position", controls.camera_position, 0.05f);
 		ImGui::SliderFloat("Pitch", &controls.camera_rotation[0], -180.0f, 180.0f, "%.1f deg");
@@ -363,7 +393,7 @@ void update([[maybe_unused]] double time) {
 		ImGui::SliderFloat("Ambient intensity", &controls.ambient_intensity, 0.0f, 1.0f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
 	}
 	if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::ColorEdit3("Albedo", controls.albedo);
+		ImGui::TextUnformatted("Albedo: checker.png");
 		ImGui::ColorEdit3("Specular color", controls.specular);
 		ImGui::SliderFloat("Shininess", &controls.shininess, 1.0f, 256.0f, "%.1f", ImGuiSliderFlags_AlwaysClamp);
 	}
@@ -399,7 +429,6 @@ bool render(const graphics::internal::FrameData& fd) {
 		.light_direction_intensity = glm::vec4(lightDirection(), controls.light_intensity),
 		.light_color = glm::vec4(controls.light_color[0], controls.light_color[1], controls.light_color[2], 0.0f),
 		.ambient_color_intensity = glm::vec4(controls.ambient_color[0], controls.ambient_color[1], controls.ambient_color[2], controls.ambient_intensity),
-		.albedo = glm::vec4(controls.albedo[0], controls.albedo[1], controls.albedo[2], 0.0f),
 		.specular_shininess = glm::vec4(controls.specular[0], controls.specular[1], controls.specular[2], controls.shininess),
 	};
 	std::memcpy(uniform_mapped_data, &uniforms, sizeof(uniforms));
@@ -437,10 +466,13 @@ bool render(const graphics::internal::FrameData& fd) {
 	vkCmdSetScissor(fd.command_buffer, 0, 1, &scissor);
 	vkCmdBindPipeline(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 	const VkDeviceSize offset = 0;
-	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vertex_buffer, &offset);
+	vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vertex_buffer.handle, &offset);
+	vkCmdBindIndexBuffer(fd.command_buffer, index_buffer.handle, 0, VK_INDEX_TYPE_UINT32);
+	const uint32_t model_index = 0;
+	const uint32_t dynamic_offset = uint32_t(model_index * uniform_stride);
 	vkCmdBindDescriptorSets(fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-	                        pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
-	vkCmdDraw(fd.command_buffer, uint32_t(std::size(positions)), 1, 0, 0);
+	                        pipeline_layout, 0, 1, &descriptor_set, 1, &dynamic_offset);
+	vkCmdDrawIndexed(fd.command_buffer, index_count, 1, 0, 0, 0);
 	vkCmdEndRenderPass(fd.command_buffer);
 	return vkEndCommandBuffer(fd.command_buffer) == VK_SUCCESS;
 }

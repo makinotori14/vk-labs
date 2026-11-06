@@ -3,7 +3,7 @@ include(FetchContent)
 
 project(vulkan-starter-app LANGUAGES C CXX)
 
-add_executable(${PROJECT_NAME} source/main.cpp source/graphics_internal.cpp source/application.cpp)
+add_executable(${PROJECT_NAME} source/main.cpp source/graphics_internal.cpp source/application.cpp source/gpu_resources.cpp)
 
 if(LINUX)
 	target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
@@ -26,7 +26,10 @@ set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD_REQUIRED TRUE CXX_
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLM_FORCE_DEPTH_ZERO_TO_ONE)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
 	APP_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders"
+	APP_TEXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/textures"
 )
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
+configure_file(textures/checker.png ${CMAKE_CURRENT_BINARY_DIR}/textures/checker.png COPYONLY)
 
 FetchContent_Declare(
 	glm
